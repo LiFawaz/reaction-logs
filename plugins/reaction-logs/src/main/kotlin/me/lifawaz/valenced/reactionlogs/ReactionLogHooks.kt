@@ -233,6 +233,21 @@ internal class ReactionLogHooks(
         })
     }
 
+    private fun applyStyle(view: LinearLayout, removed: Boolean) {
+        val count = countText(view)
+        val original = originalStyles.getOrPut(view) {
+            OriginalStyle(view.backgroundTintList, count?.textColors)
+        }
+
+        if (removed) {
+            view.backgroundTintList = ColorStateList.valueOf(REMOVED_TINT)
+            count?.setTextColor(REMOVED_RED)
+        } else {
+            view.backgroundTintList = original.backgroundTint
+            original.countColors?.let { count?.setTextColor(it) }
+        }
+    }
+
     private fun hookReactionDetails(dexFinder: DexFinder) {
         val providerClass = dexFinder.classLoader.loadClass(MANAGE_REACTIONS_MODEL_PROVIDER)
         val messageIdGetter = providerClass.methods.firstOrNull {
