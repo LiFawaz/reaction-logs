@@ -17,6 +17,11 @@ val reactionLogs = plugin {
             null
         }
 
+        registerNativeMethod("lifawaz.reaction-logs.setTimeFormat24Hour") { args ->
+            hooks?.setTimeFormat24Hour(args[0] as Boolean)
+            null
+        }
+
         registerNativeMethod("lifawaz.reaction-logs.clear") {
             hooks?.clear()
             null

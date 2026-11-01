@@ -1,20 +1,46 @@
+import Page from '@valenced/components/Page'
 import { Design } from '@valenced/discord/design'
+import type { PluginSettingsComponent } from '@valenced/plugins/types'
+import type { ComponentProps } from 'react'
+import { setTimeFormat24Hour } from './native'
+import { DefaultSettings } from './shared'
+import type { Settings } from './shared'
 
-export default function SettingsComponent() {
-    const TableRowGroup = Design?.TableRowGroup
-    const TableRow = Design?.TableRow
+const { TableRadioGroup, TableRadioRow } = Design
 
-    if (!TableRowGroup || !TableRow) return null
+type SettingsProps = ComponentProps<
+    PluginSettingsComponent<{ jsonStorage: Settings }>
+>
+
+export default function SettingsComponent({
+    api: { jsonStorage: storage },
+}: SettingsProps) {
+    const { clockFormat } = { ...DefaultSettings, ...storage.use() }
+
+    const changeClockFormat = (format: Settings['clockFormat']) => {
+        storage.set({ clockFormat: format })
+        setTimeFormat24Hour(format === '24h')
+    }
 
     return (
-        <TableRowGroup
-            title="Reaction Logs"
-            description="Removed reactions are retained locally while this plugin is running."
-        >
-            <TableRow
-                label="Keep removed reactions"
-                subLabel="Removed reaction pills are highlighted red and show their removal time beside the emoji in your device's local 24-hour time."
-            />
-        </TableRowGroup>
+        <Page>
+            <TableRadioGroup
+                title="Timestamp clock"
+                description="Small removal times appear beside the emoji in the reaction-details popup, using your phone's local timezone."
+                value={clockFormat}
+                onChange={changeClockFormat}
+            >
+                <TableRadioRow
+                    label="12-hour"
+                    subLabel="Example: 11:28 AM"
+                    value="12h"
+                />
+                <TableRadioRow
+                    label="24-hour"
+                    subLabel="Example: 23:28"
+                    value="24h"
+                />
+            </TableRadioGroup>
+        </Page>
     )
 }

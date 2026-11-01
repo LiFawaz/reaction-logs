@@ -1,6 +1,8 @@
 import { onFluxEventDispatched } from '@valenced/discord/flux'
-import { setRemoved, clearRemoved } from './native'
+import { setRemoved, setTimeFormat24Hour, clearRemoved } from './native'
 import SettingsComponent from './settings'
+import { DefaultSettings } from './shared'
+import type { Settings } from './shared'
 
 interface Emoji {
     id?: string | null
@@ -26,8 +28,14 @@ interface PendingRemoval {
 
 const ECHO_WINDOW_MS = 10_000
 
-export default plugin({
-    start({ cleanup, plugin }) {
+export default plugin<{ jsonStorage: Settings }>({
+    jsonStorage: {
+        load: true,
+        default: DefaultSettings,
+    },
+
+    start({ cleanup, plugin, jsonStorage }) {
+        setTimeFormat24Hour(jsonStorage.cache?.clockFormat === '24h')
         const pendingRemovals = new Map<string, PendingRemoval>()
         const pendingAddEchoes = new Map<string, number>()
 
