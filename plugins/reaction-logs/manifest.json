@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Mark removed reactions red and show their removal time and affected user on long-press.",
-  "version": "1.2.1",
+  "description": "Keep removed reaction rows visible and show removal details on long-press.",
+  "version": "1.2.2",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
