@@ -16,7 +16,7 @@ https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages/index.json
 
 ## Source
 
-All plugin source code is on the `main` branch. GitHub Actions builds and publishes the installable package automatically.
+The plugin source code is available on the `main` branch.
 
 ## Important
 
