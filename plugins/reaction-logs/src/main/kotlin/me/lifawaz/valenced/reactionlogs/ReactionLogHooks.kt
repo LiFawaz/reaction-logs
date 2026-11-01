@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -41,6 +42,7 @@ internal class ReactionLogHooks(
     private val bridge: ValencedBridge,
 ) {
     private data class Pill(val emoji: Any?, val burst: Boolean, val count: Int)
+    private data class DetailsPlacement(val host: ViewGroup, val anchor: View)
 
     private data class OriginalStyle(
         val backgroundTint: ColorStateList?,
@@ -415,10 +417,10 @@ internal class ReactionLogHooks(
             )
             return
         }
-        val container = reactionEmojiContainer(itemView) ?: run {
+        val placement = reactionDetailsPlacement(itemView) ?: run {
             detailLogOnce(
                 "emoji-container-missing",
-                "row binder ran, but the emoji TextView/container was not found; itemView=${itemView.javaClass.name}",
+                "row binder ran, but no emoji container or suitable row parent was found; itemView=${itemView.javaClass.name}",
             )
             return
         }
@@ -432,13 +434,14 @@ internal class ReactionLogHooks(
         val messageId = readMessageIdFromContext(itemView.context) ?: detailsMessageId
         val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
 
-        detailKeys[container] = key
+        val host = placement.host
+        detailKeys[host] = key
         detailLogOnce(
             "row-bound",
             "popup emoji row bound; emoji=$emojiPart; messageId=${messageId ?: "unavailable"}; " +
-                "container=${container.javaClass.name}",
+                "labelHost=${host.javaClass.name}; anchor=${placement.anchor.javaClass.name}",
         )
-        applyDetailsTimestamp(container, key)
+        applyDetailsTimestamp(host, key)
     }
 
     private fun readMessageIdFromContext(context: android.content.Context): String? {
@@ -476,7 +479,13 @@ internal class ReactionLogHooks(
         return null
     }
 
-    private fun reactionEmojiContainer(itemView: View): ViewGroup? {
+    /**
+     * Find a row-level host for the timestamp instead of putting the text inside
+     * the emoji-only container (which is often measured to the emoji's width).
+     * Prefer the nearest horizontal LinearLayout that has sibling content. If the
+     * row is vertical, place the label after the emoji group as a separate line.
+     */
+    private fun reactionDetailsPlacement(itemView: View): DetailsPlacement? {
         val resources = itemView.resources
         val packageName = itemView.context.packageName
         val containerId = resources.getIdentifier(
@@ -504,14 +513,32 @@ internal class ReactionLogHooks(
             null
         }) ?: findEmojiView(itemView) ?: return null
 
-        val container = if (containerId != 0) {
+        val emojiContainer = (if (containerId != 0) {
             itemView.findViewById<View>(containerId) as? ViewGroup
         } else {
             null
-        } ?: (emojiView.parent as? ViewGroup) ?: return null
+        }) ?: (emojiView.parent as? ViewGroup) ?: return null
 
-        ensureDetailsLabel(container, emojiView)
-        return container
+        var childOnPath: View = emojiContainer
+        var parent = emojiContainer.parent as? ViewGroup
+        var nearestLinear: DetailsPlacement? = null
+
+        while (parent != null) {
+            if (parent is LinearLayout) {
+                val candidate = DetailsPlacement(parent, childOnPath)
+                if (nearestLinear == null) nearestLinear = candidate
+                if (
+                    parent.orientation == LinearLayout.HORIZONTAL &&
+                    parent.childCount > 1
+                ) {
+                    return candidate
+                }
+            }
+            childOnPath = parent
+            parent = parent.parent as? ViewGroup
+        }
+
+        return nearestLinear ?: DetailsPlacement(emojiContainer, emojiView)
     }
 
     private fun findEmojiView(root: View): View? {
@@ -524,41 +551,52 @@ internal class ReactionLogHooks(
         return null
     }
 
-    private fun ensureDetailsLabel(container: ViewGroup, emojiView: View): TextView {
-        detailLabels[container]?.let { existing ->
-            if (existing.parent === container) return existing
-            detailLabels.remove(container)
+    private fun ensureDetailsLabel(
+        host: ViewGroup,
+        anchor: View,
+        emojiView: View,
+    ): TextView {
+        detailLabels[host]?.let { existing ->
+            if (existing.parent === host) {
+                val anchorIndex = host.indexOfChild(anchor)
+                val labelIndex = host.indexOfChild(existing)
+                if (anchorIndex >= 0 && labelIndex != anchorIndex + 1) {
+                    host.removeView(existing)
+                    host.addView(
+                        existing,
+                        (host.indexOfChild(anchor) + 1).coerceIn(0, host.childCount),
+                    )
+                }
+                return existing
+            }
+            detailLabels.remove(host)
         }
 
-        val label = TextView(container.context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+        val label = TextView(host.context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f)
             setTextColor(REMOVED_RED)
             gravity = Gravity.CENTER_VERTICAL
             includeFontPadding = false
-            maxLines = 1
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = (132f * host.resources.displayMetrics.density).toInt()
             typeface = (emojiView as? TextView)?.typeface
             visibility = View.GONE
         }
-        val margin = (3f * container.resources.displayMetrics.density).toInt()
-        val layoutParams: ViewGroup.LayoutParams = if (container is LinearLayout) {
+        val margin = (4f * host.resources.displayMetrics.density).toInt()
+        val insertIndex = (host.indexOfChild(anchor) + 1).coerceIn(0, host.childCount)
+        host.addView(
+            label,
+            insertIndex,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply {
                 marginStart = margin
                 gravity = Gravity.CENTER_VERTICAL
-            }
-        } else {
-            ViewGroup.MarginLayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply {
-                marginStart = margin
-            }
-        }
-        val insertIndex = (container.indexOfChild(emojiView) + 1).coerceIn(0, container.childCount)
-        container.addView(label, insertIndex, layoutParams)
-        detailLabels[container] = label
+            },
+        )
+        detailLabels[host] = label
         return label
     }
 
