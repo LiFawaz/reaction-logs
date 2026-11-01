@@ -27,12 +27,8 @@ import java.util.TimeZone
 import java.util.WeakHashMap
 
 private const val SHORTCUTS_FLEXBOX = "com.discord.reactions.ShortcutsFlexbox"
-private const val MANAGE_REACTIONS_MODEL_PROVIDER =
-    "com.discord.widgets.chat.managereactions.ManageReactionsModelProvider"
-private const val MG_RECYCLER_VIEW_HOLDER =
-    "com.discord.utilities.mg_recycler.MGRecyclerViewHolder"
-private const val REACTION_EMOJI_VIEW_HOLDER =
-    "com.discord.widgets.chat.managereactions.ManageReactionsEmojisAdapter\$ReactionEmojiViewHolder"
+private const val REACTION_MESSAGE_EXTRA = "com.discord.intent.extra.EXTRA_MESSAGE_ID"
+private const val REACTION_EMOJI_ITEM_PREFIX = "ReactionEmojiItem(reaction="
 private const val REACTION_EMOJI_CONTAINER_ID = "manage_reactions_emoji_container"
 private const val REACTION_EMOJI_VIEW_ID = "manage_reactions_emoji_emoji_textview"
 
@@ -251,76 +247,129 @@ internal class ReactionLogHooks(
     }
 
     private fun hookReactionDetails(dexFinder: DexFinder) {
-        val providerClass = dexFinder.classLoader.loadClass(MANAGE_REACTIONS_MODEL_PROVIDER)
-        val messageIdGetter = providerClass.methods.firstOrNull {
-            it.name == "getMessageId" && it.parameterCount == 0
-        } ?: error("ManageReactionsModelProvider.getMessageId not found")
-        val getModel = providerClass.methods.firstOrNull {
-            it.name == "get" && it.parameterCount == 0
-        } ?: error("ManageReactionsModelProvider.get not found")
+        // Discord 352.2+ obfuscates private class and member names. Find the
+        // popup lifecycle callback by the stable EXTRA_MESSAGE_ID literal.
+        val popupLifecycleHooks = listOfNotNull(
+            dexFinder.findMethod {
+                matcher {
+                    name("onViewCreated")
+                    paramCount(2)
+                    usingEqStrings(REACTION_MESSAGE_EXTRA)
+                }
+            },
+            dexFinder.findMethod {
+                matcher {
+                    name("onViewBound")
+                    paramCount(1)
+                    usingEqStrings(REACTION_MESSAGE_EXTRA)
+                }
+            },
+        ).distinct()
 
-        unhooks += getModel.hook(before = { param ->
-            detailsMessageId = runCatching {
-                messageIdGetter.invoke(param.thisObject)?.toString()
-            }.getOrNull()
-            XposedBridge.log("Reaction Logs: opened reaction details for message ${detailsMessageId ?: "unknown"}")
-        })
-
-        // Hook the actual emoji row after Discord finishes configuring it. The old
-        // shared-base hook ran from inside super.onConfigure(), before the row's
-        // own onConfigure2() had finished.
-        val rowHolder = runCatching {
-            dexFinder.classLoader.loadClass(REACTION_EMOJI_VIEW_HOLDER)
-        }.getOrNull()
-        var rowHooks = 0
-        if (rowHolder != null) {
-            val configureMethods = rowHolder.declaredMethods.filter {
-                it.name in setOf("onConfigure", "onConfigure2") &&
-                    it.parameterCount == 2 &&
-                    it.parameterTypes[0] == Int::class.javaPrimitiveType
-            }
-            for (method in configureMethods) {
-                method.isAccessible = true
-                unhooks += method.hook(after = { param ->
-                    bindDetailsRow(param.thisObject, param.args.getOrNull(1))
-                })
-                rowHooks++
-            }
+        if (popupLifecycleHooks.isEmpty()) {
+            error("Manage reactions popup lifecycle method not found")
         }
 
-        // Older/newer Discord builds may rename or move the private row holder.
-        // Keep the RecyclerView base hook as a compatibility fallback.
-        if (rowHooks == 0) {
-            val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
-            val configure = holderBase.declaredMethods.firstOrNull {
-                it.name == "onConfigure" &&
-                    it.parameterCount == 2 &&
-                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                    it.parameterTypes[1] == Any::class.java
-            } ?: error("No compatible reaction row configure method found")
-            configure.isAccessible = true
-            unhooks += configure.hook(after = { param ->
-                bindDetailsRow(param.thisObject, param.args.getOrNull(1))
+        for (method in popupLifecycleHooks) {
+            unhooks += method.hook(after = { param ->
+                detailsMessageId = readDetailsMessageId(param.thisObject)
+                XposedBridge.log(
+                    "Reaction Logs: reaction popup message ID " +
+                        (detailsMessageId ?: "unavailable"),
+                )
             })
         }
 
+        // ReactionEmojiItem is a Kotlin data class. Its toString prefix is
+        // stable even when R8 changes the actual class name.
+        val emojiItemClass = dexFinder.findClass {
+            matcher { addUsingString(REACTION_EMOJI_ITEM_PREFIX) }
+        } ?: error("ReactionEmojiItem data class not found")
+
+        val emojiClass = dexFinder.findClass {
+            matcher { addUsingString("MessageReactionEmoji(name=") }
+        } ?: error("MessageReactionEmoji data class not found")
+
+        // Avoid reflective getter names: R8 can rename getReaction/getEmoji.
+        // The item has exactly one non-primitive, non-String field: MessageReaction.
+        val reactionField = emojiItemClass.declaredFields.singleOrNull {
+            !Modifier.isStatic(it.modifiers) &&
+                !it.type.isPrimitive &&
+                it.type != String::class.java
+        } ?: error("ReactionEmojiItem reaction field not found")
+        reactionField.isAccessible = true
+
+        // The emoji field is found by its runtime type, not its potentially
+        // obfuscated field name.
+        val emojiField = reactionField.type.declaredFields.singleOrNull {
+            !Modifier.isStatic(it.modifiers) && it.type == emojiClass
+        } ?: error("MessageReaction emoji field not found")
+        emojiField.isAccessible = true
+
+        // Find the specialized onConfigure(position, ReactionEmojiItem) method.
+        // This avoids relying on the obfuscated RecyclerView holder class name.
+        val configure = dexFinder.findMethod {
+            matcher {
+                paramCount(2)
+                paramTypes("int", emojiItemClass.name)
+            }
+        } ?: error("Reaction emoji row configure method not found")
+
+        unhooks += configure.hook(after = { param ->
+            bindDetailsRow(
+                param.thisObject,
+                param.args.getOrNull(1),
+                reactionField,
+                emojiField,
+            )
+        })
+
         XposedBridge.log(
-            "Reaction Logs: reaction-details row hook installed (${if (rowHooks > 0) "$rowHooks row method(s)" else "base fallback"})"
+            "Reaction Logs: obfuscation-aware popup hooks installed " +
+                "(lifecycle=" + popupLifecycleHooks.size +
+                ", row=" + configure.declaringClass.name + "." + configure.name + ")",
         )
     }
 
-    private fun bindDetailsRow(holder: Any, data: Any?) {
+    private fun readDetailsMessageId(fragment: Any): String? {
+        val arguments = invokeNoArgs(fragment, "getArguments") as? android.os.Bundle
+        val argumentId = runCatching {
+            arguments?.getLong(REACTION_MESSAGE_EXTRA, 0L) ?: 0L
+        }.getOrDefault(0L)
+        if (argumentId > 0L) return argumentId.toString()
+
+        // Older Discord popup implementations read the message ID from the host Intent.
+        val intent = invokeNoArgs(fragment, "getMostRecentIntent") as? android.content.Intent
+        val intentId = runCatching {
+            intent?.getLongExtra(REACTION_MESSAGE_EXTRA, 0L) ?: 0L
+        }.getOrDefault(0L)
+        return intentId.takeIf { it > 0L }?.toString()
+    }
+
+    private fun invokeNoArgs(target: Any, methodName: String): Any? {
+        val method = generateSequence(target.javaClass) { it.superclass }
+            .flatMap { it.declaredMethods.asSequence() }
+            .firstOrNull { it.name == methodName && it.parameterCount == 0 }
+            ?: target.javaClass.methods.firstOrNull {
+                it.name == methodName && it.parameterCount == 0
+            }
+            ?: return null
+
+        return runCatching {
+            method.isAccessible = true
+            method.invoke(target)
+        }.getOrNull()
+    }
+
+    private fun bindDetailsRow(
+        holder: Any,
+        data: Any?,
+        reactionField: java.lang.reflect.Field,
+        emojiField: java.lang.reflect.Field,
+    ) {
         if (data == null) return
-        val reaction = runCatching {
-            data.javaClass.methods.firstOrNull {
-                it.name == "getReaction" && it.parameterCount == 0
-            }?.invoke(data)
-        }.getOrNull() ?: return
-        val emoji = runCatching {
-            reaction.javaClass.methods.firstOrNull {
-                it.name == "getEmoji" && it.parameterCount == 0
-            }?.invoke(reaction)
-        }.getOrNull() ?: return
+        val reaction = runCatching { reactionField.get(data) }.getOrNull() ?: return
+        val emoji = runCatching { emojiField.get(reaction) }.getOrNull() ?: return
 
         val itemView = holderItemView(holder) ?: return
         val container = reactionEmojiContainer(itemView) ?: return
@@ -374,11 +423,11 @@ internal class ReactionLogHooks(
             "com.discord",
         )
 
-        val emojiView = if (emojiId != 0) {
+        val emojiView = (if (emojiId != 0) {
             itemView.findViewById<View>(emojiId)
         } else {
-            findEmojiView(itemView)
-        } ?: return null
+            null
+        }) ?: findEmojiView(itemView) ?: return null
 
         val container = if (containerId != 0) {
             itemView.findViewById<View>(containerId) as? ViewGroup
@@ -401,7 +450,10 @@ internal class ReactionLogHooks(
     }
 
     private fun ensureDetailsLabel(container: ViewGroup, emojiView: View): TextView {
-        detailLabels[container]?.let { return it }
+        detailLabels[container]?.let { existing ->
+            if (existing.parent === container) return existing
+            detailLabels.remove(container)
+        }
 
         val label = TextView(container.context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
