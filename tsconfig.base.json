@@ -11,6 +11,6 @@
     "noEmit": true,
     "types": ["@valenced/types"]
   },
-  "include": ["\${configDir}/**/*", "types"],
-  "exclude": ["\${configDir}/build", "\${configDir}/node_modules"]
+  "include": ["${configDir}/**/*", "types"],
+  "exclude": ["${configDir}/build", "${configDir}/node_modules"]
 }
