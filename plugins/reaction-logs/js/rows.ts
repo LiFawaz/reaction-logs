@@ -113,8 +113,9 @@ export function styleRow(
             [GeneratedNode]: true,
         })
 
+        const mentionContent: ContentNode[] = []
         if (log.removedBy.avatarUrl) {
-            labels.push({
+            mentionContent.push({
                 type: 'customEmoji',
                 id: 'reaction-log-avatar-' + log.removedBy.userId,
                 alt: log.removedBy.displayName + ' avatar',
@@ -123,17 +124,18 @@ export function styleRow(
                 [GeneratedNode]: true,
             })
         }
+        mentionContent.push({
+            type: 'text',
+            content: '@' + log.removedBy.displayName,
+        })
 
-        // This is Discord's native user-mention node. Its userId makes the name
-        // tappable and opens the same profile sheet as an ordinary chat mention.
+        // Discord's native mention node makes the name and avatar one tappable
+        // target and opens the same profile sheet as an ordinary chat mention.
         labels.push({
             type: 'mention',
             userId: log.removedBy.userId,
             ...(log.guildId ? { guildId: log.guildId } : {}),
-            content: [{
-                type: 'text',
-                content: '@' + log.removedBy.displayName,
-            }],
+            content: mentionContent,
             [GeneratedNode]: true,
         })
     }
