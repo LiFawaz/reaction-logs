@@ -85,11 +85,23 @@ internal class ReactionLogHooks(
             removedUsersByKey.clear()
             removedUsersByKey.putAll(parsed)
         }
-        synchronized(retainedPillViews) {
+        val staleRetainedViews = synchronized(retainedPillViews) {
+            val stale = retainedPillViews
+                .filterKeys { it !in parsed.keys }
+                .values
+                .toList()
             retainedPillViews.keys.retainAll(parsed.keys)
+            stale
         }
 
         mainHandler.post {
+            // Remove an old retained pill when the same emoji is added again.
+            // Discord can then render the newly added reaction as a fresh pill.
+            staleRetainedViews.forEach { view ->
+                (view.parent as? ViewGroup)?.removeView(view)
+                boundPills.remove(view)
+                applyPillStyle(view, false)
+            }
             for ((pill, key) in boundPills.entries.toList()) {
                 applyPillStyle(pill, isRemoved(key))
             }
