@@ -38,7 +38,6 @@ interface ChannelStoreShape {
     getChannel(id: string): { guild_id?: string | null; guildId?: string | null } | undefined
 }
 
-const REMOVAL_ECHO_WINDOW_MS = 10_000
 const MAX_HISTORY_ENTRIES = 500
 
 export default plugin<{ jsonStorage: HistoryStorage }>({
@@ -48,21 +47,34 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
     },
 
     start({ cleanup, plugin, jsonStorage }) {
-        // Active removals only drive the temporary red reaction-pill style.
-        // The append-only history below is a separate, persistent log.
+        // The live red state is stored locally and remains separate from history.
         const activeRemovals = new Map<string, Set<string>>()
-        const recentRemovalEchoes = new Map<string, number>()
-        const userStore = Stores.UserStore as unknown as UserStoreShape
-        const channelStore = Stores.ChannelStore as unknown as ChannelStoreShape
+        for (const item of jsonStorage.cache?.activeRemovals ?? []) {
+            if (!item?.pillKey) continue
+            activeRemovals.set(item.pillKey, new Set(item.removedUsers ?? []))
+        }
 
-        let history = [...(jsonStorage.cache?.entries ?? [])]
+        // Remove the old timestamp field when migrating existing local history.
+        let history = (jsonStorage.cache?.entries ?? []).map(entry => {
+            const cleanEntry = { ...entry } as RemovalLogEntry & { removedAt?: number }
+            delete cleanEntry.removedAt
+            return cleanEntry
+        })
         let nextId = jsonStorage.cache?.nextId ?? 1
         let persistQueue = Promise.resolve()
+        const pendingRemovalEchoes = new Set<string>()
+
+        const userStore = Stores.UserStore as unknown as UserStoreShape
+        const channelStore = Stores.ChannelStore as unknown as ChannelStoreShape
 
         const persistHistory = () => {
             const snapshot: HistoryStorage = {
                 entries: [...history],
                 nextId,
+                activeRemovals: [...activeRemovals].map(([pillKey, users]) => ({
+                    pillKey,
+                    removedUsers: [...users],
+                })),
             }
             persistQueue = persistQueue
                 .then(() => jsonStorage.set(snapshot, true))
@@ -116,22 +128,10 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
         const recordRemoval = (payload: ReactionPayload, key: string) => {
             const userId = payload.userId || '*'
             const token = key + '\u0000' + userId
-            const now = Date.now()
 
-            // Discord can dispatch an optimistic removal and then its gateway echo.
-            // Ignore only that duplicate pair. A later add clears the token so a
-            // genuine remove-after-readd is logged as a new entry.
-            for (const [recentToken, expiresAt] of recentRemovalEchoes) {
-                if (expiresAt <= now) recentRemovalEchoes.delete(recentToken)
-            }
-            const expiresAt = recentRemovalEchoes.get(token)
-            if (userId !== '*' && expiresAt !== undefined && expiresAt > now) {
-                recentRemovalEchoes.delete(token)
-                return false
-            }
-            if (userId !== '*') {
-                recentRemovalEchoes.set(token, now + REMOVAL_ECHO_WINDOW_MS)
-            }
+            // Ignore Discord's duplicate optimistic/gateway event pair without a timer.
+            if (userId !== '*' && pendingRemovalEchoes.delete(token)) return false
+            if (userId !== '*') pendingRemovalEchoes.add(token)
 
             const users = activeRemovals.get(key) ?? new Set<string>()
             users.add(userId)
@@ -148,7 +148,6 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 reactionType: payload.reactionType === 1 || payload.burst === true ? 1 : 0,
                 userId,
                 userName: userId === '*' ? 'Unknown user' : getUserName(userId),
-                removedAt: now,
             }
 
             history = [...history, entry].slice(-MAX_HISTORY_ENTRIES)
@@ -157,20 +156,8 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             return true
         }
 
-        const clearActiveForKey = (key: string, userId?: string) => {
-            const users = activeRemovals.get(key)
-            if (!users) return false
-
-            if (userId) {
-                users.delete(userId)
-                users.delete('*')
-            } else {
-                users.clear()
-            }
-
-            if (users.size === 0) activeRemovals.delete(key)
-            return true
-        }
+        // Any new use of this exact emoji resets its red marker completely.
+        const clearActiveForKey = (key: string) => activeRemovals.delete(key)
 
         const clearActiveMessage = (messageId?: string) => {
             if (!messageId) return false
@@ -203,11 +190,12 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                     if (!key) return payload
 
                     const userId = payload.userId || '*'
-                    recentRemovalEchoes.delete(key + '\u0000' + userId)
+                    pendingRemovalEchoes.delete(key + '\u0000' + userId)
 
-                    // Adding the reaction clears only the current red marker.
-                    // It must never erase the historical removal entry.
-                    if (clearActiveForKey(key, payload.userId)) syncNative()
+                    if (clearActiveForKey(key)) {
+                        persistHistory()
+                        syncNative()
+                    }
                     return payload
                 },
             ),
@@ -215,7 +203,10 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             onFluxEventDispatched<ReactionPayload>(
                 'MESSAGE_REACTION_REMOVE_ALL',
                 payload => {
-                    if (clearActiveMessage(payload.messageId)) syncNative()
+                    if (clearActiveMessage(payload.messageId)) {
+                        persistHistory()
+                        syncNative()
+                    }
                     return payload
                 },
             ),
@@ -237,7 +228,10 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                         }
                     }
 
-                    if (changed) syncNative()
+                    if (changed) {
+                        persistHistory()
+                        syncNative()
+                    }
                     return payload
                 },
             ),
@@ -245,7 +239,10 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             onFluxEventDispatched<ReactionPayload>(
                 'MESSAGE_DELETE',
                 payload => {
-                    if (clearActiveMessage(payload.id ?? payload.messageId)) syncNative()
+                    if (clearActiveMessage(payload.id ?? payload.messageId)) {
+                        persistHistory()
+                        syncNative()
+                    }
                     // Historical entries deliberately survive message deletion.
                     return payload
                 },
@@ -258,14 +255,17 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                     for (const messageId of payload.ids ?? []) {
                         changed = clearActiveMessage(messageId) || changed
                     }
-                    if (changed) syncNative()
+                    if (changed) {
+                        persistHistory()
+                        syncNative()
+                    }
                     return payload
                 },
             ),
 
             () => {
                 activeRemovals.clear()
-                recentRemovalEchoes.clear()
+                pendingRemovalEchoes.clear()
                 try {
                     clearRemoved()
                 } catch (error) {
@@ -273,6 +273,10 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 }
             },
         )
+
+        // Restore locally saved red markers immediately after the plugin starts.
+        syncNative()
+        persistHistory()
     },
 
     SettingsComponent,
