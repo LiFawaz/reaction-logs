@@ -271,6 +271,9 @@ internal class ReactionLogHooks(
             matcher {
                 paramCount(2)
                 paramTypes("int", emojiItemClass.name)
+                // Kotlin emits a bridge with the same parameter types. The real
+                // onConfigure2 method contains the non-null parameter label "data".
+                usingEqStrings("data")
             }
         } ?: error("Reaction emoji row configure method not found")
 
