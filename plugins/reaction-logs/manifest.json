@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Keep removed reaction pills visible and save detailed removal history with Discord links.",
-  "version": "1.2.7",
+  "description": "Keep removed reaction pills red locally and save removal details with Discord profile and message links.",
+  "version": "1.0.0",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
