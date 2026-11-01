@@ -125,8 +125,8 @@ export default plugin<{ jsonStorage: Settings }>({
                 withName<RowManager>('RowManager'),
                 ({ prototype }) => {
                     cleanup(
-                        instead(prototype, 'generate', function (args: GenerateArgs, original: (args: GenerateArgs) => ReturnType<RowManager['prototype']['generate']>) {
-                            const row = original.call(this, args)
+                        instead(prototype, 'generate', function (args, original) {
+                            const row = original.apply(this, args)
 
                             try {
                                 styleRow(row, logs, changed, settings)
@@ -135,8 +135,7 @@ export default plugin<{ jsonStorage: Settings }>({
                             }
 
                             return row
-                        }),
-                    )
+                        }),                    )
                 },
             ),
 
