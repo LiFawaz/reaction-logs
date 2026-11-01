@@ -1,8 +1,7 @@
 import { Stores, onFluxEventDispatched } from '@valenced/discord/flux'
 import { setRemoved, clearRemoved } from './native'
-import SettingsComponent from './settings'
 import { DefaultStorage } from './shared'
-import type { HistoryStorage, RemovalLogEntry } from './shared'
+import type { ReactionStorage } from './shared'
 
 interface Emoji {
     id?: string | null
@@ -23,54 +22,25 @@ interface ReactionPayload {
     optimistic?: boolean
 }
 
-interface CachedUser {
-    id: string
-    globalName?: string | null
-    displayName?: string | null
-    username?: string | null
-}
-
-interface UserStoreShape {
-    getUser(id: string): CachedUser | undefined
-}
-
-interface ChannelStoreShape {
-    getChannel(id: string): { guild_id?: string | null; guildId?: string | null } | undefined
-}
-
-const MAX_HISTORY_ENTRIES = 500
-
-export default plugin<{ jsonStorage: HistoryStorage }>({
+export default plugin<{ jsonStorage: ReactionStorage }>({
     jsonStorage: {
         load: true,
         default: DefaultStorage,
     },
 
     start({ cleanup, plugin, jsonStorage }) {
-        // The live red state is stored locally and remains separate from history.
+        // Only the active local red-marker state is retained.
         const activeRemovals = new Map<string, Set<string>>()
         for (const item of jsonStorage.cache?.activeRemovals ?? []) {
             if (!item?.pillKey) continue
             activeRemovals.set(item.pillKey, new Set(item.removedUsers ?? []))
         }
 
-        // Remove the old timestamp field when migrating existing local history.
-        let history = (jsonStorage.cache?.entries ?? []).map(entry => {
-            const cleanEntry = { ...entry } as RemovalLogEntry & { removedAt?: number }
-            delete cleanEntry.removedAt
-            return cleanEntry
-        })
-        let nextId = jsonStorage.cache?.nextId ?? 1
         let persistQueue = Promise.resolve()
         const pendingRemovalEchoes = new Set<string>()
 
-        const userStore = Stores.UserStore as unknown as UserStoreShape
-        const channelStore = Stores.ChannelStore as unknown as ChannelStoreShape
-
-        const persistHistory = () => {
-            const snapshot: HistoryStorage = {
-                entries: [...history],
-                nextId,
+        const persistState = () => {
+            const snapshot: ReactionStorage = {
                 activeRemovals: [...activeRemovals].map(([pillKey, users]) => ({
                     pillKey,
                     removedUsers: [...users],
@@ -79,7 +49,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             persistQueue = persistQueue
                 .then(() => jsonStorage.set(snapshot, true))
                 .catch(error => {
-                    plugin.reportError('Failed to save reaction history: ' + String(error))
+                    plugin.reportError('Failed to save removed reaction state: ' + String(error))
                 })
         }
 
@@ -106,25 +76,6 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             return reactionKey(payload.messageId, emojiKey, reactionType)
         }
 
-        const getGuildId = (channelId: string): string | null => {
-            try {
-                const channel = channelStore.getChannel(channelId)
-                return channel?.guild_id ?? channel?.guildId ?? null
-            } catch {
-                return null
-            }
-        }
-
-        const getUserName = (userId: string) => {
-            const user = userStore.getUser(userId)
-            return (
-                user?.globalName?.trim() ||
-                user?.displayName?.trim() ||
-                user?.username?.trim() ||
-                userId
-            )
-        }
-
         const recordRemoval = (payload: ReactionPayload, key: string) => {
             const userId = payload.userId || '*'
             const token = key + '\u0000' + userId
@@ -137,21 +88,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             users.add(userId)
             activeRemovals.set(key, users)
 
-            const emoji = payload.emoji
-            const entry: RemovalLogEntry = {
-                id: String(nextId++),
-                messageId: payload.messageId ?? '',
-                channelId: payload.channelId ?? '',
-                guildId: payload.guildId ?? payload.guild_id ?? (payload.channelId ? getGuildId(payload.channelId) : null),
-                emojiName: emoji?.name ?? 'Unknown emoji',
-                emojiId: emoji?.id ?? null,
-                reactionType: payload.reactionType === 1 || payload.burst === true ? 1 : 0,
-                userId,
-                userName: userId === '*' ? 'Unknown user' : getUserName(userId),
-            }
-
-            history = [...history, entry].slice(-MAX_HISTORY_ENTRIES)
-            persistHistory()
+            persistState()
             syncNative()
             return true
         }
@@ -179,8 +116,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 payload => {
                     const key = makeKey(payload)
                     if (key) recordRemoval(payload, key)
-                    // Match the original working implementation: prevent Discord
-                    // from removing the local reaction pill. We only recolor it.
+                    // Keep Discord from removing the local pill; only recolor it red.
                     return undefined
                 },
             ),
@@ -195,10 +131,9 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                     pendingRemovalEchoes.delete(key + '\u0000' + userId)
 
                     if (clearActiveForKey(key)) {
-                        persistHistory()
+                        persistState()
                         syncNative()
                         // The retained local pill already represents this reaction.
-                        // Swallow the add event so Discord does not change its count.
                         return undefined
                     }
                     return payload
@@ -209,7 +144,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 'MESSAGE_REACTION_REMOVE_ALL',
                 payload => {
                     if (clearActiveMessage(payload.messageId)) {
-                        persistHistory()
+                        persistState()
                         syncNative()
                     }
                     return payload
@@ -234,7 +169,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                     }
 
                     if (changed) {
-                        persistHistory()
+                        persistState()
                         syncNative()
                     }
                     return payload
@@ -245,10 +180,9 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 'MESSAGE_DELETE',
                 payload => {
                     if (clearActiveMessage(payload.id ?? payload.messageId)) {
-                        persistHistory()
+                        persistState()
                         syncNative()
                     }
-                    // Historical entries deliberately survive message deletion.
                     return payload
                 },
             ),
@@ -261,7 +195,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                         changed = clearActiveMessage(messageId) || changed
                     }
                     if (changed) {
-                        persistHistory()
+                        persistState()
                         syncNative()
                     }
                     return payload
@@ -281,10 +215,8 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
 
         // Restore locally saved red markers immediately after the plugin starts.
         syncNative()
-        persistHistory()
+        persistState()
     },
-
-    SettingsComponent,
 })
 
 function reactionKey(messageId: string, emojiKey: string, reactionType: number) {
