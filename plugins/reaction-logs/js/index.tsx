@@ -1,4 +1,7 @@
 import { Stores, onFluxEventDispatched } from '@valenced/discord/flux'
+import { getModules } from '@valenced/modules/finders'
+import { withProps } from '@valenced/modules/finders/filters'
+import { instead } from '@valenced/patcher'
 import { setRemoved, setTimeFormat24Hour, clearRemoved } from './native'
 import SettingsComponent from './settings'
 import { DefaultSettings } from './shared'
@@ -31,6 +34,27 @@ interface CachedUser {
 interface UserStoreShape {
     getUser(id: string): CachedUser | undefined
     getCurrentUser(): CachedUser | undefined
+}
+
+interface RemoveReactionOptions {
+    channelId: string
+    messageId: string
+    emoji: Emoji
+    location?: string
+    userId?: string
+}
+
+interface ReactionActionCreators {
+    addReaction(
+        channelId: string,
+        messageId: string,
+        emoji: Emoji,
+        location?: string,
+    ): unknown
+    removeReaction(options: RemoveReactionOptions): unknown
+    ReactionLocations?: {
+        MESSAGE?: string
+    }
 }
 
 interface PendingUserRemoval {
@@ -161,6 +185,69 @@ export default plugin<{ jsonStorage: Settings }>({
             return changed
         }
 
+        // A removed pill remains visible locally, but a second tap on your own
+        // retained pill must add your reaction instead of sending another DELETE.
+        cleanup(
+            getModules(
+                withProps<ReactionActionCreators>(
+                    'addReaction',
+                    'removeReaction',
+                ),
+                creators => {
+                    cleanup(
+                        instead(
+                            creators,
+                            'removeReaction',
+                            function (args, original) {
+                                const options = args[0] as
+                                    | RemoveReactionOptions
+                                    | undefined
+                                if (
+                                    !options?.channelId ||
+                                    !options.messageId ||
+                                    !options.emoji?.name
+                                ) {
+                                    return Reflect.apply(original, this, args)
+                                }
+
+                                const userId = options.userId ?? getCurrentUserId()
+                                const key = reactionKey(
+                                    options.messageId,
+                                    options.emoji.id
+                                        ? options.emoji.name + ':' + options.emoji.id
+                                        : options.emoji.name,
+                                    0,
+                                )
+
+                                if (
+                                    !userId ||
+                                    !pendingRemovals.get(key)?.users.has(userId)
+                                ) {
+                                    return Reflect.apply(original, this, args)
+                                }
+
+                                const location =
+                                    options.location ??
+                                    creators.ReactionLocations?.MESSAGE ??
+                                    'Message'
+
+                                // The original removal event was retained locally.
+                                // Re-adding here updates the server and its optimistic
+                                // ADD is balanced by the event hook below.
+                                return creators.addReaction(
+                                    options.channelId,
+                                    options.messageId,
+                                    options.emoji,
+                                    location,
+                                )
+                            },
+                        ),
+                    )
+                },
+                { max: 1 },
+            ),
+        )
+
         cleanup(
             onFluxEventDispatched<ReactionPayload>(
                 'MESSAGE_REACTION_REMOVE',
@@ -179,7 +266,7 @@ export default plugin<{ jsonStorage: Settings }>({
 
                     if (userId) {
                         // An optimistic removal may be followed by its gateway echo.
-                        // Keep one record and let the first event update Discord's real state.
+                        // Save one entry per affected user and retain the local pill.
                         if (state.users.has(userId)) return undefined
                         state.users.set(userId, {
                             removedAt,
@@ -193,9 +280,9 @@ export default plugin<{ jsonStorage: Settings }>({
                     pendingRemovals.set(key, state)
                     syncNative()
 
-                    // Do not cancel the removal. Discord must update the local "me" flag
-                    // so the reaction can be added again with a normal tap.
-                    return payload
+                    // Keep Discord's local reaction row untouched. The server still
+                    // receives the remove request from ReactionActionCreators.
+                    return undefined
                 },
             ),
 
@@ -209,20 +296,22 @@ export default plugin<{ jsonStorage: Settings }>({
                     const userId = payload.userId
                     const token = userId ? echoKey(key, userId) : null
 
-                    // Optimistic add was already applied locally; suppress only its
-                    // later gateway echo, not the actual add event.
+                    // If we balanced an optimistic add, discard its later gateway echo.
                     if (token && !payload.optimistic && pendingAddEchoes.has(token)) {
                         pendingAddEchoes.delete(token)
                         return undefined
                     }
 
-                    if (token && payload.optimistic) {
-                        pendingAddEchoes.set(token, Date.now() + ECHO_WINDOW_MS)
+                    const balanced = clearMatchingRemoval(key, userId)
+                    if (balanced) {
+                        if (token && payload.optimistic) {
+                            pendingAddEchoes.set(token, Date.now() + ECHO_WINDOW_MS)
+                        }
+                        syncNative()
+                        // The locally retained pill already includes this reaction.
+                        return undefined
                     }
 
-                    if (clearMatchingRemoval(key, userId)) syncNative()
-
-                    // Keep normal add behavior so reaction counts and "me" state stay correct.
                     return payload
                 },
             ),
