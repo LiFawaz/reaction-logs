@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Save removed reactions in a persistent history, independent of reaction pills.",
-  "version": "1.2.6",
+  "description": "Keep removed reaction pills visible and save detailed removal history with Discord links.",
+  "version": "1.2.7",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
