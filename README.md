@@ -2,13 +2,15 @@
 
 A Valenced-only plugin for Discord Android.
 
-When a reaction is removed, the plugin keeps that reaction visible in your local session and highlights its reaction pill in red. Hold the reaction to open its details: the plugin shows the removal time in small text on the same line, directly beside that emoji in the popup's emoji list.
+When a reaction is removed, the plugin marks the remaining reaction pill red. Long-press a red reaction to open Android's tooltip with the local removal time and the user whose reaction disappeared. Dismissing the tooltip does not clear it; long-press the same red reaction again to show it.
 
 The timestamp defaults to a 12-hour clock (for example, `removed at 11:28 AM`). You can switch to a 24-hour clock (for example, `removed at 23:28`) in the plugin's settings. Both formats use your device's current local timezone automatically.
 
-Each reaction is matched by message ID, emoji ID/name, and reaction type, so removed reactions and their timestamps stay attached to the correct message and emoji. When the same reaction is added again, its matching removal marker and timestamp are cleared.
+Reaction add and remove events are allowed to update Discord's real local state. This keeps reaction counts and your own reaction toggle in sync, so you can add a reaction again after removing it. The removal marker clears when that same user adds the reaction again.
 
-Removed reactions are retained while the plugin is running. Reloading Discord clears the local markers and displays the real server state again.
+The name shown is the user whose reaction was removed, based on Discord's reaction event. Discord does not include the identity of a moderator or other actor who may have triggered a removal, so the plugin cannot identify that actor.
+
+Removal history is kept locally while the plugin is running. Reloading Discord clears the local markers and displays the real server state again. A reaction with a count of zero is removed from Discord's normal reaction row; the saved marker can appear again if that emoji is later added back.
 
 ## Install
 
