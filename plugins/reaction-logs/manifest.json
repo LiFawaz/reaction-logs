@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Keep removed reactions visible locally by highlighting their reaction pills, without timestamps or remover labels.",
-  "version": "1.0.8",
+  "description": "Keep removed reactions visible locally with a red highlight and a local removal timestamp beside the emoji.",
+  "version": "1.0.9",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"

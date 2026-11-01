@@ -4,7 +4,11 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextSwitcher
 import android.widget.TextView
@@ -15,7 +19,11 @@ import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.LinkedHashMap
 import java.util.LinkedHashSet
+import java.util.Locale
 import java.util.WeakHashMap
 
 private const val SHORTCUTS_FLEXBOX = "com.discord.reactions.ShortcutsFlexbox"
@@ -34,9 +42,10 @@ internal class ReactionLogHooks(
         val countColors: ColorStateList?,
     )
 
-    private val removedKeys = LinkedHashSet<String>()
+    private val removedAtByKey = LinkedHashMap<String, Long>()
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
+    private val timeLabels = WeakHashMap<LinearLayout, TextView>()
     private val bindingMessageId = ThreadLocal<String?>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val unhooks = mutableListOf<XC_MethodHook.Unhook>()
@@ -46,29 +55,29 @@ internal class ReactionLogHooks(
     }
 
     fun setRemoved(json: String) {
-        val parsed = LinkedHashSet<String>()
+        val parsed = LinkedHashMap<String, Long>()
         val array = JSONArray(json)
 
         for (index in 0 until array.length()) {
             val item = array.optJSONObject(index) ?: continue
             val key = item.optString("pillKey").takeIf { it.isNotBlank() } ?: continue
-            parsed.add(key)
+            parsed[key] = item.optLong("removedAt", 0L)
         }
 
-        synchronized(removedKeys) {
-            removedKeys.clear()
-            removedKeys.addAll(parsed)
+        synchronized(removedAtByKey) {
+            removedAtByKey.clear()
+            removedAtByKey.putAll(parsed)
         }
 
         mainHandler.post {
             for ((pill, key) in bound.entries.toList()) {
-                applyStyle(pill, isRemoved(key))
+                applyStyle(pill, isRemoved(key), removedAt(key))
             }
         }
     }
 
     fun clear() {
-        synchronized(removedKeys) { removedKeys.clear() }
+        synchronized(removedAtByKey) { removedAtByKey.clear() }
         mainHandler.post {
             for (pill in bound.keys.toList()) {
                 applyStyle(pill, false)
@@ -79,18 +88,25 @@ internal class ReactionLogHooks(
     fun dispose() {
         unhooks.forEach { it.unhook() }
         unhooks.clear()
-        synchronized(removedKeys) { removedKeys.clear() }
+        synchronized(removedAtByKey) { removedAtByKey.clear() }
         mainHandler.post {
             for (pill in bound.keys.toList()) {
                 applyStyle(pill, false)
             }
+            for ((pill, label) in timeLabels.entries.toList()) {
+                if (label.parent === pill) pill.removeView(label)
+            }
             bound.clear()
             originalStyles.clear()
+            timeLabels.clear()
         }
     }
 
     private fun isRemoved(key: String): Boolean =
-        synchronized(removedKeys) { key in removedKeys }
+        synchronized(removedAtByKey) { key in removedAtByKey }
+
+    private fun removedAt(key: String): Long? =
+        synchronized(removedAtByKey) { removedAtByKey[key] }
 
     private fun hookReactionPills(dexFinder: DexFinder) {
         val accessoryClass = dexFinder.findClass {
@@ -186,25 +202,75 @@ internal class ReactionLogHooks(
 
                 val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
                 bound[pillView] = key
-                applyStyle(pillView, isRemoved(key))
+                applyStyle(pillView, isRemoved(key), removedAt(key))
             }
         })
     }
 
-    private fun applyStyle(view: LinearLayout, removed: Boolean) {
+    private fun applyStyle(view: LinearLayout, removed: Boolean, removedAt: Long? = null) {
         val count = countText(view)
         val original = originalStyles.getOrPut(view) {
             OriginalStyle(view.backgroundTintList, count?.textColors)
         }
 
+        val timestamp = timeLabels[view]
         if (removed) {
             view.backgroundTintList = ColorStateList.valueOf(REMOVED_TINT)
             count?.setTextColor(REMOVED_RED)
+
+            if (removedAt != null && removedAt > 0L) {
+                val label = timestampLabel(view, count)
+                label.text = "removed at ${formatLocalTime(removedAt)}"
+                label.visibility = View.VISIBLE
+            } else {
+                timestamp?.visibility = View.GONE
+            }
         } else {
             view.backgroundTintList = original.backgroundTint
             original.countColors?.let { count?.setTextColor(it) }
+            timestamp?.apply {
+                text = ""
+                visibility = View.GONE
+            }
         }
     }
+
+    private fun timestampLabel(view: LinearLayout, count: TextView?): TextView {
+        timeLabels[view]?.let { return it }
+
+        val label = TextView(view.context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            setTextColor(REMOVED_RED)
+            gravity = Gravity.CENTER_VERTICAL
+            includeFontPadding = false
+            maxLines = 1
+            typeface = count?.typeface
+            visibility = View.GONE
+        }
+
+        val emojiIndex = (0 until view.childCount)
+            .firstOrNull { view.getChildAt(it) is ImageView }
+        val countIndex = (0 until view.childCount)
+            .firstOrNull { view.getChildAt(it) is TextSwitcher }
+        val insertIndex = (emojiIndex?.plus(1) ?: countIndex ?: view.childCount)
+            .coerceIn(0, view.childCount)
+        val margin = (2f * view.resources.displayMetrics.density).toInt()
+        val layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ).apply {
+            marginStart = margin
+            marginEnd = margin
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        view.addView(label, insertIndex, layoutParams)
+        timeLabels[view] = label
+        return label
+    }
+
+    private fun formatLocalTime(timestamp: Long): String =
+        SimpleDateFormat("HH:mm", Locale.ROOT).format(Date(timestamp))
 
     private fun countText(view: ViewGroup): TextView? {
         for (index in 0 until view.childCount) {

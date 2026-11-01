@@ -20,8 +20,8 @@ interface ReactionPayload {
 }
 
 interface PendingRemoval {
-    users: Set<string>
-    anonymous: number
+    users: Map<string, number>
+    anonymous: number[]
 }
 
 const ECHO_WINDOW_MS = 10_000
@@ -31,11 +31,25 @@ export default plugin({
         const pendingRemovals = new Map<string, PendingRemoval>()
         const pendingAddEchoes = new Map<string, number>()
 
+        const latestRemovalAt = (state: PendingRemoval): number | null => {
+            let latest = 0
+
+            for (const timestamp of state.users.values()) {
+                if (timestamp > latest) latest = timestamp
+            }
+            for (const timestamp of state.anonymous) {
+                if (timestamp > latest) latest = timestamp
+            }
+
+            return latest > 0 ? latest : null
+        }
+
         const syncNative = () => {
             try {
-                const entries = [...pendingRemovals]
-                    .filter(([, state]) => state.users.size > 0 || state.anonymous > 0)
-                    .map(([pillKey]) => ({ pillKey }))
+                const entries = [...pendingRemovals].flatMap(([pillKey, state]) => {
+                    const removedAt = latestRemovalAt(state)
+                    return removedAt === null ? [] : [{ pillKey, removedAt }]
+                })
                 setRemoved(JSON.stringify(entries))
             } catch (error) {
                 plugin.reportError('Failed to refresh reaction logs: ' + String(error))
@@ -68,16 +82,16 @@ export default plugin({
             if (userId && state.users.delete(userId)) {
                 // Prefer balancing the same user's removal when they react again.
             } else if (state.users.size > 0) {
-                // A new user adding this emoji also balances one old locally-retained removal.
-                const firstUser = state.users.values().next().value
-                if (firstUser) state.users.delete(firstUser)
-            } else if (state.anonymous > 0) {
-                state.anonymous--
+                // A new user adding this emoji also balances the oldest local removal.
+                const firstUser = state.users.keys().next().value
+                if (firstUser !== undefined) state.users.delete(firstUser)
+            } else if (state.anonymous.length > 0) {
+                state.anonymous.shift()
             } else {
                 return false
             }
 
-            if (state.users.size === 0 && state.anonymous === 0) {
+            if (state.users.size === 0 && state.anonymous.length === 0) {
                 pendingRemovals.delete(key)
             }
             return true
@@ -110,17 +124,18 @@ export default plugin({
                     if (!key) return payload
 
                     const state = pendingRemovals.get(key) ?? {
-                        users: new Set<string>(),
-                        anonymous: 0,
+                        users: new Map<string, number>(),
+                        anonymous: [],
                     }
 
+                    const removedAt = Date.now()
                     if (payload.userId) {
                         // Discord may send an optimistic removal followed by its gateway echo.
                         // Count that user once, but swallow both events so the pill stays visible.
                         if (state.users.has(payload.userId)) return undefined
-                        state.users.add(payload.userId)
+                        state.users.set(payload.userId, removedAt)
                     } else {
-                        state.anonymous++
+                        state.anonymous.push(removedAt)
                     }
 
                     pendingRemovals.set(key, state)

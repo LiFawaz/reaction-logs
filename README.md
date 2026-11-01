@@ -2,9 +2,9 @@
 
 A Valenced-only plugin for Discord Android.
 
-When a reaction is removed, the plugin keeps that reaction visible in your local session and highlights its reaction pill in red. It does not add a timestamp, arrow, remover name, or text underneath the reaction.
+When a reaction is removed, the plugin keeps that reaction visible in your local session, highlights its reaction pill in red, and shows \`removed at HH:mm\` directly beside the emoji inside that pill. The time uses your device's local timezone and a 24-hour clock.
 
-Each reaction is matched by message ID, emoji ID/name, and reaction type, so removed reactions are marked on their own reaction pills.
+Each reaction is matched by message ID, emoji ID/name, and reaction type, so removed reactions and their timestamps stay attached to their own reaction pills. When the same reaction is added again, its matching removal marker and timestamp are cleared.
 
 Removed reactions are retained while the plugin is running. Reloading Discord clears the local markers and displays the real server state again.
 
@@ -16,7 +16,7 @@ https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages/index.json
 
 ## Source
 
-The plugin source code is available on the `main` branch.
+The plugin source code is available on the \`main\` branch.
 
 ## Important
 

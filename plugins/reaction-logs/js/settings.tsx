@@ -13,7 +13,7 @@ export default function SettingsComponent() {
         >
             <TableRow
                 label="Keep removed reactions"
-                subLabel="Removed reactions are highlighted directly on their reaction pills. No timestamp or remover label is shown."
+                subLabel="Removed reaction pills are highlighted red and show their removal time beside the emoji in your device's local 24-hour time."
             />
         </TableRowGroup>
     )
