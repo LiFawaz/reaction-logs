@@ -16,6 +16,7 @@ import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.util.LinkedHashMap
 import java.util.LinkedHashSet
 import java.util.WeakHashMap
@@ -41,6 +42,8 @@ internal class ReactionLogHooks(
     private data class UserRowBinding(val messageId: String, val userId: String)
 
     private val removedUsersByKey = LinkedHashMap<String, Set<String>>()
+    // Keep the last non-zero model so Discord cannot remove a logged pill from the row.
+    private val retainedReactionModels = LinkedHashMap<String, Any>()
     private val boundPills = WeakHashMap<LinearLayout, String>()
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
@@ -83,6 +86,9 @@ internal class ReactionLogHooks(
             removedUsersByKey.clear()
             removedUsersByKey.putAll(parsed)
         }
+        synchronized(retainedReactionModels) {
+            retainedReactionModels.keys.retainAll(parsed.keys)
+        }
 
         mainHandler.post {
             for ((pill, key) in boundPills.entries.toList()) {
@@ -94,6 +100,7 @@ internal class ReactionLogHooks(
 
     fun clear() {
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
+        synchronized(retainedReactionModels) { retainedReactionModels.clear() }
         mainHandler.post {
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
@@ -108,6 +115,7 @@ internal class ReactionLogHooks(
         unhooks.forEach { it.unhook() }
         unhooks.clear()
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
+        synchronized(retainedReactionModels) { retainedReactionModels.clear() }
         detailsMessageId = null
         mainHandler.post {
             for (pill in boundPills.keys.toList()) {
@@ -209,7 +217,58 @@ internal class ReactionLogHooks(
             after = { bindingMessageId.remove() },
         )
 
-        unhooks += setReactions.hook(after = { param ->
+        unhooks += setReactions.hook(
+            before = { param ->
+                val messageId = bindingMessageId.get() ?: return@hook
+                val reactions = param.args.getOrNull(0) as? List<*> ?: return@hook
+                val currentKeys = LinkedHashSet<String>()
+
+                // Cache a renderable model while Discord still reports a positive count.
+                for (reaction in reactions) {
+                    if (reaction == null) continue
+                    val count = getCount.invoke(reaction) as Int
+                    val burstCount = getBurstCount.invoke(reaction) as Int
+                    val emoji = getEmoji.invoke(reaction) ?: continue
+                    val emojiName = emojiKey(emoji) ?: continue
+
+                    if (count > 0) {
+                        val key = reactionKey(messageId, emojiName, 0)
+                        currentKeys.add(key)
+                        synchronized(retainedReactionModels) {
+                            retainedReactionModels[key] = retainedReaction(
+                                reaction, reactionInterface, getCount, getBurstCount,
+                                getEmoji, false, count,
+                            )
+                        }
+                    }
+                    if (burstCount > 0) {
+                        val key = reactionKey(messageId, emojiName, 1)
+                        currentKeys.add(key)
+                        synchronized(retainedReactionModels) {
+                            retainedReactionModels[key] = retainedReaction(
+                                reaction, reactionInterface, getCount, getBurstCount,
+                                getEmoji, true, burstCount,
+                            )
+                        }
+                    }
+                }
+
+                val removedKeys = synchronized(removedUsersByKey) {
+                    removedUsersByKey.keys.filter { it.startsWith("$messageId|") }
+                }
+                if (removedKeys.any { it !in currentKeys }) {
+                    val augmented = reactions.toMutableList()
+                    for (key in removedKeys) {
+                        if (key in currentKeys) continue
+                        val retained = synchronized(retainedReactionModels) {
+                            retainedReactionModels[key]
+                        } ?: continue
+                        augmented.add(retained)
+                    }
+                    if (augmented.size != reactions.size) param.args[0] = augmented
+                }
+            },
+            after = { param ->
             val flexbox = param.thisObject as ViewGroup
             val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
             val messageId = bindingMessageId.get()
@@ -236,7 +295,8 @@ internal class ReactionLogHooks(
                 boundPills[pillView] = key
                 applyPillStyle(pillView, isRemoved(key))
             }
-        })
+            },
+        )
     }
 
     /**
@@ -480,6 +540,29 @@ internal class ReactionLogHooks(
     private companion object {
         val ID_PATTERN = Regex("""(?:[(]|, )id=([^,)]*)""")
         val NAME_PATTERN = Regex("""(?:[(]|, )name=([^,)]*)""")
+    }
+}
+
+private fun retainedReaction(
+    original: Any,
+    reactionInterface: Class<*>,
+    getCount: Method,
+    getBurstCount: Method,
+    getEmoji: Method,
+    burst: Boolean,
+    count: Int,
+): Any = Proxy.newProxyInstance(
+    reactionInterface.classLoader,
+    arrayOf(reactionInterface),
+) { proxy, method, args ->
+    when {
+        method == getCount -> if (burst) 0 else count
+        method == getBurstCount -> if (burst) count else 0
+        method == getEmoji -> getEmoji.invoke(original)
+        method.name == "toString" -> original.toString()
+        method.name == "hashCode" -> System.identityHashCode(proxy)
+        method.name == "equals" -> proxy === args?.getOrNull(0)
+        else -> method.invoke(original, *(args ?: emptyArray()))
     }
 }
 
