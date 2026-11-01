@@ -8,7 +8,6 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
-import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextSwitcher
@@ -125,12 +124,6 @@ internal class ReactionLogHooks(dexFinder: DexFinder) {
 
         val adapterItems = onBindViewHolder.declaringClass.declaredFields
             .single { List::class.java.isAssignableFrom(it.type) && !Modifier.isStatic(it.modifiers) }
-            .apply { isAccessible = true }
-
-        val viewHolderClass = onBindViewHolder.parameterTypes[0]
-        val itemViewField = generateSequence<Class<*>>(viewHolderClass) { it.superclass }
-            .flatMap { it.declaredFields.asSequence() }
-            .first { it.type == View::class.java && !Modifier.isStatic(it.modifiers) }
             .apply { isAccessible = true }
 
         val setReactions = dexFinder.findMethod {
