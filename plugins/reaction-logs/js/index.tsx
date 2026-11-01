@@ -1,14 +1,10 @@
-import { Dispatcher } from '@valenced/discord/common/flux'
+import { lookupModule } from '@valenced/modules/finders'
+import { withProps } from '@valenced/modules/finders/filters'
+import { registerJSMethod } from '@valenced/modules/native'
 import { Stores } from '@valenced/discord/flux'
 import { onFluxEventDispatched } from '@valenced/discord/flux'
-import { getModules } from '@valenced/modules/finders'
-import { withName } from '@valenced/modules/finders/filters'
-import { instead } from '@valenced/patcher'
 import { clearRemoved, setRemoved } from './native'
-import { styleRow, type ReactionLog, type RowManager } from './rows'
 import SettingsComponent from './settings'
-import { DefaultSettings } from './shared'
-import type { Settings } from './shared'
 
 interface Emoji {
     id?: string | null
@@ -31,55 +27,59 @@ interface DiscordUser {
     username?: string
     globalName?: string | null
     global_name?: string | null
-    avatar?: string | null
-    getAvatarURL?(guildId?: string | null, size?: number): string | number
 }
 
-export default plugin<{ jsonStorage: Settings }>({
-    jsonStorage: {
-        load: true,
-        default: DefaultSettings,
-    },
+interface ReactionRemover {
+    userId: string
+    displayName: string
+}
 
-    start({ cleanup, jsonStorage, plugin }) {
+interface ReactionLog {
+    id: string
+    messageId: string
+    channelId: string
+    guildId?: string
+    pillKey: string
+    deletedAtMs: number
+    removedBy?: ReactionRemover
+}
+
+interface UserProfileActions {
+    openUserProfileModal(options: { userId: string }): void
+}
+
+// Native reaction-log labels call this method when the username is tapped.
+registerJSMethod('lifawaz.reaction-logs.openProfile', (userId: string) => {
+    if (!/^\d{15,25}$/.test(userId)) return
+
+    const [profileActions] = lookupModule(
+        withProps<UserProfileActions>('openUserProfileModal'),
+    )
+
+    if (typeof profileActions?.openUserProfileModal !== 'function') {
+        throw new Error('Discord user profile action is unavailable')
+    }
+
+    profileActions.openUserProfileModal({ userId })
+})
+
+export default plugin({
+    start({ cleanup, plugin }) {
         const logs = new Map<string, ReactionLog>()
-        const changed = new Set<string>()
-        let stopped = false
         let logSequence = 0
-
-        const settings = (): Settings => ({
-            ...DefaultSettings,
-            ...(jsonStorage.cache as Partial<Settings> | undefined),
-        })
 
         const syncNative = () => {
             try {
-                const removedPills = new Set([...logs.values()].map(log => log.pillKey))
-                setRemoved([...removedPills])
+                const entries = [...logs.values()].map(log => ({
+                    pillKey: log.pillKey,
+                    deletedAtMs: log.deletedAtMs,
+                    userId: log.removedBy?.userId ?? null,
+                    displayName: log.removedBy?.displayName ?? 'Unknown user',
+                }))
+                setRemoved(JSON.stringify(entries))
             } catch (error) {
-                plugin.reportError('Could not update reaction highlight: ' + String(error))
+                plugin.reportError('Could not update reaction log labels: ' + String(error))
             }
-        }
-
-        const rerenderMessage = (log: Pick<ReactionLog, 'messageId' | 'channelId' | 'guildId'>) => {
-            changed.add(log.messageId)
-
-            // Flux cannot dispatch recursively while it is processing the reaction event.
-            Promise.resolve().then(() => {
-                if (stopped) return
-                try {
-                    Dispatcher.dispatch({
-                        type: 'MESSAGE_UPDATE',
-                        guildId: log.guildId,
-                        message: {
-                            id: log.messageId,
-                            channel_id: log.channelId,
-                        },
-                    })
-                } catch (error) {
-                    plugin.reportError('Could not refresh reaction log row: ' + String(error))
-                }
-            })
         }
 
         const handleRemoval = (payload: ReactionPayload) => {
@@ -92,77 +92,58 @@ export default plugin<{ jsonStorage: Settings }>({
             const emojiKey = emoji.id ?? emoji.name
             const pillKey = reactionKey(payload.messageId, emojiKey, reactionType)
             const now = Date.now()
+
             const log: ReactionLog = {
                 id: pillKey + ':' + now + ':' + (++logSequence),
                 messageId: payload.messageId,
                 channelId: payload.channelId,
                 guildId: payload.guildId,
-                emojiKey,
-                reactionType,
                 pillKey,
                 deletedAtMs: now,
                 removedBy: getRemover(payload.userId, payload.guildId),
             }
 
-            // Keep each removal as a separate local entry for this app session.
+            // Keep separate entries for repeated removals of the same reaction.
             logs.set(log.id, log)
             syncNative()
-            rerenderMessage(log)
 
-            // Discord still processes the server-side change. This only retains the pill locally.
+            // Block only this client's removal event. Discord's server state is unchanged.
             return undefined
         }
 
         cleanup(
-            onFluxEventDispatched<ReactionPayload>('MESSAGE_REACTION_REMOVE', payload => {
-                if (!settings().enabled) return payload
-                return handleRemoval(payload)
-            }),
+            onFluxEventDispatched<ReactionPayload>('MESSAGE_REACTION_REMOVE', payload =>
+                handleRemoval(payload),
+            ),
 
-            // A later add clears the local tombstone for that emoji.
+            // If the same reaction is added again, remove its local deletion labels.
             onFluxEventDispatched<ReactionPayload>('MESSAGE_REACTION_ADD', payload => {
-                if (!settings().enabled || !payload.emoji?.name || !payload.messageId) return payload
+                if (!payload.emoji?.name || !payload.messageId) return payload
 
                 const reactionType = Number.isFinite(payload.reactionType)
                     ? Number(payload.reactionType)
                     : 0
-                const key = reactionKey(payload.messageId, payload.emoji.id ?? payload.emoji.name, reactionType)
+                const key = reactionKey(
+                    payload.messageId,
+                    payload.emoji.id ?? payload.emoji.name,
+                    reactionType,
+                )
                 const previous = [...logs.values()].filter(log => log.pillKey === key)
                 if (!previous.length) return payload
 
                 for (const log of previous) logs.delete(log.id)
                 syncNative()
-                rerenderMessage(previous[previous.length - 1]!)
+
+                // The retained local count already includes the reaction being added.
                 return undefined
             }),
 
-            getModules(
-                withName<RowManager>('RowManager'),
-                ({ prototype }) => {
-                    cleanup(
-                        instead(prototype, 'generate', function (args, original) {
-                            const row = original.apply(this, args)
-
-                            try {
-                                styleRow(row, logs, changed, settings)
-                            } catch (error) {
-                                plugin.reportError('Could not render reaction log: ' + String(error))
-                            }
-
-                            return row
-                        }),
-                    )
-                },
-            ),
-
             () => {
-                stopped = true
                 logs.clear()
-                changed.clear()
                 try {
                     clearRemoved()
                 } catch (error) {
-                    plugin.reportError('Could not clear reaction highlights: ' + String(error))
+                    plugin.reportError('Could not clear reaction log labels: ' + String(error))
                 }
             },
         )
@@ -171,7 +152,7 @@ export default plugin<{ jsonStorage: Settings }>({
     SettingsComponent,
 })
 
-function getRemover(userId?: string, guildId?: string): ReactionLog['removedBy'] {
+function getRemover(userId?: string, guildId?: string): ReactionRemover | undefined {
     if (!userId || !/^\d{15,25}$/.test(userId)) return undefined
 
     try {
@@ -189,25 +170,7 @@ function getRemover(userId?: string, guildId?: string): ReactionLog['removedBy']
             user?.username ||
             userId
 
-        let avatarUrl: string | undefined
-        try {
-            const avatar = user?.getAvatarURL?.(guildId ?? null, 64)
-            if (typeof avatar === 'string' && /^https?:\/\//i.test(avatar)) {
-                avatarUrl = avatar
-            }
-        } catch {
-            // Fall back to the user's global avatar hash below.
-        }
-
-        if (!avatarUrl && typeof user?.avatar === 'string' && user.avatar) {
-            avatarUrl = 'https://cdn.discordapp.com/avatars/' +
-                userId + '/' + user.avatar + '.png?size=64'
-        }
-        if (!avatarUrl) {
-            avatarUrl = 'https://cdn.discordapp.com/embed/avatars/0.png'
-        }
-
-        return { userId, displayName: String(displayName), avatarUrl }
+        return { userId, displayName: String(displayName) }
     } catch {
         return { userId, displayName: userId }
     }

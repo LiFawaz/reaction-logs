@@ -1,15 +1,27 @@
 # Reaction Logs
 
-A Valenced-only plugin that keeps removed reactions visible in your own Discord session.
+A Valenced-only plugin for Discord Android.
 
-When someone removes a reaction, Reaction Logs blocks the local removal event. The reaction stays on your screen, its pill is marked red, and the message shows when it was removed.
+When a reaction is removed, the plugin keeps that reaction visible in your local session and marks its pill red. Directly underneath that exact reaction, it shows a down-arrow log:
 
-The log is temporary. Reloading Discord clears the local markers and syncs the real reaction state again.
+`↓ This was deleted at 12:34 PM by @username`
+
+The timestamp uses the device's current locale and timezone, so it follows the same local clock setting as Discord. Tapping the username opens that user's Discord profile.
+
+Each reaction is matched by message ID, emoji ID/name, and reaction type. If several people remove the same emoji, their entries are stacked beneath that emoji's pill. Other emojis in the same message get their own separate entries.
+
+Removed reactions are always retained while the plugin is running. There is no setting to turn that core behavior off. Reloading Discord clears the local markers and displays the real server state again.
 
 ## Install
 
-Build the plugin ZIP from GitHub Actions, then install it in Valenced.
+Add this repository in Valenced:
 
-## Notes
+https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages/index.json
 
-This only changes what your client displays. It does not restore the reaction on Discord's servers, and other users will see the real state.
+## Source
+
+All plugin source code and workflows are on the `main` branch. GitHub Actions builds and publishes the installable package automatically.
+
+## Important
+
+This only changes what your client displays. It does not restore a reaction on Discord's servers, and other users see the real state.

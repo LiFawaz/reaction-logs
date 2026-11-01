@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: reaction-logs-gh-pages
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: read
@@ -74,7 +78,6 @@ jobs:
                   }
               }
           }
-          # write an ordinary JSON file; do not append the literal characters backslash+n
           (publish / "index.json").write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
           PY
 

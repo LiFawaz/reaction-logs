@@ -1,8 +1,8 @@
 import { callNativeMethodSync } from '@valenced/modules/native'
 
-/** Synchronously updates visible reaction pills before Discord redraws them. */
-export function setRemoved(keys: string[]) {
-    callNativeMethodSync('lifawaz.reaction-logs.setRemoved', [JSON.stringify(keys)])
+/** Sends the current per-reaction deletion entries to the Android view hook. */
+export function setRemoved(json: string) {
+    callNativeMethodSync('lifawaz.reaction-logs.setRemoved', [json])
 }
 
 export function clearRemoved() {

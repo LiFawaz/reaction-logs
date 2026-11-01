@@ -10,7 +10,7 @@ val reactionLogs = plugin {
     var hooks: ReactionLogHooks? = null
 
     start {
-        hooks = ReactionLogHooks(dexFinder)
+        hooks = ReactionLogHooks(dexFinder, bridge)
 
         registerNativeMethod("lifawaz.reaction-logs.setRemoved") { args ->
             hooks?.setRemoved(args[0] as String)
