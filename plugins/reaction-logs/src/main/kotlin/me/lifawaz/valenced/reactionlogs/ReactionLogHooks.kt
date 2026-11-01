@@ -3,7 +3,7 @@ package me.lifawaz.valenced.reactionlogs
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
-import android.graphics.Gravity
+import android.view.Gravity
 import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
