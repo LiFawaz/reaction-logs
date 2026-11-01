@@ -20,6 +20,7 @@ import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.LinkedHashMap
@@ -47,6 +48,8 @@ internal class ReactionLogHooks(
     )
 
     private val removedAtByKey = LinkedHashMap<String, RemovedEntry>()
+    /** Last real emoji model observed for each reaction, used to keep a zero-count red row renderable. */
+    private val knownReactionEmojis = LinkedHashMap<String, Any>()
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
     private val originalLongClickListeners = WeakHashMap<View, View.OnLongClickListener?>()
@@ -94,6 +97,7 @@ internal class ReactionLogHooks(
         synchronized(removedAtByKey) {
             removedAtByKey.clear()
             removedAtByKey.putAll(parsed)
+            knownReactionEmojis.keys.retainAll(parsed.keys)
         }
 
         mainHandler.post {
@@ -113,7 +117,10 @@ internal class ReactionLogHooks(
     }
 
     fun clear() {
-        synchronized(removedAtByKey) { removedAtByKey.clear() }
+        synchronized(removedAtByKey) {
+            removedAtByKey.clear()
+            knownReactionEmojis.clear()
+        }
         mainHandler.post {
             for ((pill, key) in bound.entries.toList()) {
                 applyStyle(pill, false)
@@ -124,7 +131,10 @@ internal class ReactionLogHooks(
     fun dispose() {
         unhooks.forEach { it.unhook() }
         unhooks.clear()
-        synchronized(removedAtByKey) { removedAtByKey.clear() }
+        synchronized(removedAtByKey) {
+            removedAtByKey.clear()
+            knownReactionEmojis.clear()
+        }
         mainHandler.post {
             for (popup in removalPopups.values.toList()) {
                 runCatching { popup.dismiss() }
@@ -238,7 +248,60 @@ internal class ReactionLogHooks(
             after = { bindingMessageId.remove() },
         )
 
-        unhooks += setReactions.hook(after = { param ->
+        unhooks += setReactions.hook(
+            before = { param ->
+                val originalReactions = param.args.getOrNull(0) as? List<*> ?: return@hook
+                val messageId = bindingMessageId.get() ?: return@hook
+                val currentPills = pills(originalReactions, getCount, getBurstCount, getEmoji)
+                val currentKeys = LinkedHashSet<String>()
+
+                // Cache the actual emoji model before Discord's REMOVE update can
+                // drop a zero-count reaction from the list.
+                for (pill in currentPills) {
+                    val emoji = pill.emoji ?: continue
+                    val emojiPart = emojiKey(emoji) ?: continue
+                    val key = reactionKey(messageId, emojiPart, if (pill.burst) 1 else 0)
+                    currentKeys.add(key)
+                    synchronized(knownReactionEmojis) {
+                        knownReactionEmojis[key] = emoji
+                    }
+                }
+
+                val missingKeys = synchronized(removedAtByKey) {
+                    removedAtByKey.keys.filter { key ->
+                        key.startsWith("$messageId|") && key !in currentKeys
+                    }
+                }
+                if (missingKeys.isNotEmpty()) {
+                    val synthetic = missingKeys.mapNotNull { key ->
+                        val emoji = synchronized(knownReactionEmojis) {
+                            knownReactionEmojis[key]
+                        } ?: return@mapNotNull null
+                        val burst = key.substringAfterLast('|') == "1"
+                        createSyntheticReaction(
+                            reactionInterface,
+                            getCount,
+                            getBurstCount,
+                            getEmoji,
+                            emoji,
+                            burst,
+                        )
+                    }
+
+                    if (synthetic.isNotEmpty()) {
+                        // The server-side count can be zero, but the client keeps a
+                        // local red row with me=false so it can be tapped to react again.
+                        param.args[0] = ArrayList<Any>(originalReactions.size + synthetic.size).apply {
+                            addAll(originalReactions)
+                            addAll(synthetic)
+                        }
+                        XposedBridge.log(
+                            "Reaction Logs: retained ${synthetic.size} removed reaction row(s) for message $messageId",
+                        )
+                    }
+                }
+            },
+            after = { param ->
             val flexbox = param.thisObject as ViewGroup
             val reactions = param.args[0] as? List<*> ?: emptyList<Any>()
             val messageId = bindingMessageId.get()
@@ -270,7 +333,40 @@ internal class ReactionLogHooks(
                 bound[pillView] = key
                 applyStyle(pillView, isRemoved(key))
             }
-        })
+        },
+        )
+    }
+
+    private fun createSyntheticReaction(
+        reactionInterface: Class<*>,
+        getCount: Method,
+        getBurstCount: Method,
+        getEmoji: Method,
+        emoji: Any,
+        burst: Boolean,
+    ): Any {
+        return Proxy.newProxyInstance(
+            reactionInterface.classLoader,
+            arrayOf(reactionInterface),
+        ) { proxy, method, args ->
+            when {
+                method == getEmoji -> emoji
+                method == getCount -> if (burst) 0 else 1
+                method == getBurstCount -> if (burst) 1 else 0
+                method.name == "toString" -> "ReactionLogPlaceholder(emoji=$emoji, burst=$burst)"
+                method.name == "hashCode" -> System.identityHashCode(proxy)
+                method.name == "equals" -> proxy === args?.firstOrNull()
+                method.returnType == Boolean::class.javaPrimitiveType -> false
+                method.returnType == Int::class.javaPrimitiveType -> 0
+                method.returnType == Long::class.javaPrimitiveType -> 0L
+                method.returnType == Float::class.javaPrimitiveType -> 0f
+                method.returnType == Double::class.javaPrimitiveType -> 0.0
+                method.returnType == Short::class.javaPrimitiveType -> 0.toShort()
+                method.returnType == Byte::class.javaPrimitiveType -> 0.toByte()
+                method.returnType == Char::class.javaPrimitiveType -> '\u0000'
+                else -> null
+            }
+        }
     }
 
     private fun applyStyle(view: LinearLayout, removed: Boolean) {
