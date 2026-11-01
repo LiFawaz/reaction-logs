@@ -2,9 +2,11 @@
 
 A Valenced-only plugin for Discord Android.
 
-When a reaction is removed, the plugin marks its reaction pill red and keeps a local row visible even when Discord's server count reaches zero. The plugin does not show timestamps, popups, or removal details.
+The plugin marks a reaction pill red while Discord still displays it. Open that reaction's details to see the users who removed their reaction for that message highlighted in red.
 
-Discord's normal reaction add and remove updates are allowed to run, so the count and your own reaction state stay synchronized. When the affected user adds that reaction again, its red removal marker is cleared.
+The timestamp and popup feature is not included. The plugin does not create fake zero-count reaction pills; Discord controls whether an emoji pill remains visible.
+
+A red user row means that user's reaction-removal event was observed on this device. It does not identify a moderator or prove who initiated a removal.
 
 ## Install
 
@@ -14,4 +16,4 @@ https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages/index.json
 
 ## Important
 
-This changes only what your client displays. It does not restore reactions on Discord's servers, and other users see the real server state.
+The red highlight is local to this client. It does not change Discord's server-side reaction state.
