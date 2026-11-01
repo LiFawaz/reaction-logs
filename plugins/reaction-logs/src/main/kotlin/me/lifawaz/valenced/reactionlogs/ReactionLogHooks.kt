@@ -16,6 +16,7 @@ import app.valenced.xposed.api.DexFinder
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.text.SimpleDateFormat
@@ -56,6 +57,7 @@ internal class ReactionLogHooks(
     private val bindingMessageId = ThreadLocal<String?>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val unhooks = mutableListOf<XC_MethodHook.Unhook>()
+    private val detailLogKeys = LinkedHashSet<String>()
 
     init {
         hookReactionPills(dexFinder)
@@ -251,45 +253,66 @@ internal class ReactionLogHooks(
             matcher { addUsingString(REACTION_EMOJI_ITEM_PREFIX) }
         } ?: error("ReactionEmojiItem data class not found")
 
-        // ReactionEmojiItem has one object field (MessageReaction); MessageReaction
-        // has one object field (MessageReactionEmoji). Resolve by field shape only.
-        val reactionField = emojiItemClass.declaredFields.singleOrNull {
-            !Modifier.isStatic(it.modifiers) &&
-                !it.type.isPrimitive &&
-                it.type != String::class.java
-        } ?: error("ReactionEmojiItem reaction field not found")
+        // Resolve the actual emoji model by the same stable signature used by the
+        // reaction-pill hook. Do not assume MessageReaction has only one object field:
+        // Discord adds nested count/detail fields between app versions.
+        val emojiClass = dexFinder.findClass {
+            matcher { addUsingString("MessageReactionEmoji(name=") }
+        } ?: error("MessageReactionEmoji model class not found")
+
+        val reactionCandidates = instanceFields(emojiItemClass).filter { field ->
+            !field.type.isPrimitive &&
+                field.type != String::class.java &&
+                field.type != emojiClass &&
+                instanceFields(field.type).any { nested -> nested.type == emojiClass }
+        }
+        val reactionField = reactionCandidates.singleOrNull()
+            ?: error(
+                "ReactionEmojiItem reaction field not unique; candidates=" +
+                    reactionCandidates.joinToString { it.name + ":" + it.type.name },
+            )
         reactionField.isAccessible = true
 
-        val emojiField = reactionField.type.declaredFields.singleOrNull {
-            !Modifier.isStatic(it.modifiers) &&
-                !it.type.isPrimitive &&
-                it.type != String::class.java
-        } ?: error("MessageReaction emoji field not found")
+        val emojiField = instanceFields(reactionField.type).singleOrNull {
+            it.type == emojiClass
+        } ?: error("MessageReaction emoji field not found on ${reactionField.type.name}")
         emojiField.isAccessible = true
 
+        // First search only by the exact runtime signature. The old search required
+        // the DEX string "data", which can disappear when Kotlin compiler output changes.
+        // Keep that narrower query as a fallback for builds with duplicate signatures.
         val configure = dexFinder.findMethod {
             matcher {
                 paramCount(2)
                 paramTypes("int", emojiItemClass.name)
-                // Kotlin emits a bridge with the same parameter types. The real
-                // onConfigure2 method contains the non-null parameter label "data".
+            }
+        } ?: dexFinder.findMethod {
+            matcher {
+                paramCount(2)
+                paramTypes("int", emojiItemClass.name)
                 usingEqStrings("data")
             }
-        } ?: error("Reaction emoji row configure method not found")
+        } ?: error("Reaction emoji row configure method not found by typed signature")
 
         // Delay until Discord finishes rendering the emoji and counter.
         unhooks += configure.hook(after = { param ->
             val holder = param.thisObject
             val data = param.args.getOrNull(1)
+            detailLogOnce("typed-row-hit", "typed reaction emoji row binder was called")
             if (data != null && emojiItemClass.isInstance(data)) {
                 mainHandler.post {
                     bindDetailsRow(holder, data, reactionField, emojiField)
                 }
+            } else {
+                detailLogOnce(
+                    "typed-row-data-mismatch",
+                    "typed row binder received an unexpected data object: ${data?.javaClass?.name ?: "null"}",
+                )
             }
         })
 
-        // Hook the generic RecyclerView holder method too. It catches builds where
-        // DexFinder finds a typed bridge but Android dispatches through the base binder.
+        // Also hook the generic RecyclerView holder binder where present. Some Discord
+        // builds dispatch through the erased base method rather than the typed override.
         val genericConfigure = generateSequence(configure.declaringClass) { it.superclass }
             .flatMap { it.declaredMethods.asSequence() }
             .firstOrNull { method ->
@@ -305,6 +328,7 @@ internal class ReactionLogHooks(
                 val holder = param.thisObject
                 val data = param.args.getOrNull(1)
                 if (data != null && emojiItemClass.isInstance(data)) {
+                    detailLogOnce("generic-row-hit", "generic reaction row binder was called")
                     mainHandler.post {
                         bindDetailsRow(holder, data, reactionField, emojiField)
                     }
@@ -312,8 +336,8 @@ internal class ReactionLogHooks(
             })
         }
 
-        // Prefer message ID from the popup launcher; the row's Activity context is
-        // checked independently in bindDetailsRow as a fallback.
+        // Prefer the message ID from the popup launcher. The row Activity context
+        // is checked independently in bindDetailsRow as a fallback.
         val popupOpener = dexFinder.findMethod {
             matcher {
                 paramCount(4)
@@ -333,38 +357,87 @@ internal class ReactionLogHooks(
                     ?.toLong()
                     ?.takeIf { it > 0L }
                     ?.toString()
-                XposedBridge.log(
-                    "Reaction Logs: popup opener captured message " +
-                        (detailsMessageId ?: "unavailable"),
+                detailLogOnce(
+                    "popup-opener",
+                    "popup launcher captured message " + (detailsMessageId ?: "unavailable"),
                 )
             })
+        } else {
+            detailLogOnce(
+                "popup-opener-missing",
+                "popup launcher signature was not found; row Activity context will be used",
+            )
         }
 
-        XposedBridge.log(
-            "Reaction Logs: reaction row hooks installed (typed=" +
-                configure.declaringClass.name + "." + configure.name +
-                ", generic=" + (genericConfigure != null) +
-                ", opener=" + (popupOpener != null) + ")",
+        detailLogOnce(
+            "hooks-installed",
+            "reaction details hooks installed; typed=${configure.declaringClass.name}.${configure.name}; " +
+                "generic=${genericConfigure?.declaringClass?.name ?: "not found"}; " +
+                "emojiItem=${emojiItemClass.name}; emoji=${emojiClass.name}",
         )
+    }
+
+    private fun instanceFields(type: Class<*>): List<Field> {
+        val fields = mutableListOf<Field>()
+        var current: Class<*>? = type
+        while (current != null && current != Any::class.java) {
+            fields += current.declaredFields.filterNot { Modifier.isStatic(it.modifiers) }
+            current = current.superclass
+        }
+        return fields
+    }
+
+    private fun detailLogOnce(key: String, message: String) {
+        val shouldLog = synchronized(detailLogKeys) { detailLogKeys.add(key) }
+        if (shouldLog) XposedBridge.log("Reaction Logs: $message")
     }
 
     private fun bindDetailsRow(
         holder: Any,
         data: Any?,
-        reactionField: java.lang.reflect.Field,
-        emojiField: java.lang.reflect.Field,
+        reactionField: Field,
+        emojiField: Field,
     ) {
         if (data == null) return
-        val reaction = runCatching { reactionField.get(data) }.getOrNull() ?: return
-        val emoji = runCatching { emojiField.get(reaction) }.getOrNull() ?: return
+        val reaction = runCatching { reactionField.get(data) }.getOrNull() ?: run {
+            detailLogOnce("reaction-read-failed", "could not read the reaction object from the popup row")
+            return
+        }
+        val emoji = runCatching { emojiField.get(reaction) }.getOrNull() ?: run {
+            detailLogOnce("emoji-read-failed", "could not read the emoji object from the reaction")
+            return
+        }
 
-        val itemView = holderItemView(holder) ?: return
-        val container = reactionEmojiContainer(itemView) ?: return
-        val emojiPart = emojiKey(emoji) ?: return
+        val itemView = holderItemView(holder) ?: run {
+            detailLogOnce(
+                "item-view-missing",
+                "row binder ran, but no RecyclerView itemView was found on ${holder.javaClass.name}",
+            )
+            return
+        }
+        val container = reactionEmojiContainer(itemView) ?: run {
+            detailLogOnce(
+                "emoji-container-missing",
+                "row binder ran, but the emoji TextView/container was not found; itemView=${itemView.javaClass.name}",
+            )
+            return
+        }
+        val emojiPart = emojiKey(emoji) ?: run {
+            detailLogOnce(
+                "emoji-key-missing",
+                "row binder ran, but could not read the emoji name/ID from ${emoji.javaClass.name}",
+            )
+            return
+        }
         val messageId = readMessageIdFromContext(itemView.context) ?: detailsMessageId
         val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
 
         detailKeys[container] = key
+        detailLogOnce(
+            "row-bound",
+            "popup emoji row bound; emoji=$emojiPart; messageId=${messageId ?: "unavailable"}; " +
+                "container=${container.javaClass.name}",
+        )
         applyDetailsTimestamp(container, key)
     }
 
@@ -512,10 +585,18 @@ internal class ReactionLogHooks(
         }
         val label = detailLabels[container] ?: return
         if (timestamp == null) {
+            detailLogOnce(
+                "timestamp-not-matched",
+                "popup row was found but no saved removal timestamp matched key=${key.take(64)}",
+            )
             label.visibility = View.GONE
             return
         }
 
+        detailLogOnce(
+            "timestamp-matched",
+            "saved removal timestamp matched popup row key=${key.take(64)}",
+        )
         label.text = "removed at ${formatLocalTime(timestamp)}"
         label.visibility = View.VISIBLE
     }
