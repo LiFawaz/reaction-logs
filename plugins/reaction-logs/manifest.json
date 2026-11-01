@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "id": "lifawaz.reaction-logs",
+  "name": "Reaction Logs",
+  "author": "Li Fawaz",
+  "description": "Keep removed reactions visible in your current Discord session, mark them red, and show when they were removed.",
+  "version": "1.0.0",
+  "dependencies": {
+    "valenced.api": { "version": ">=1 <2" },
+    "discord": { "version": ">=352.2" }
+  },
+  "dist": {
+    "script": "index.js",
+    "android": {
+      "path": "plugin.jar",
+      "class": "me.lifawaz.valenced.reactionlogs.ReactionLogs"
+    }
+  }
+}
