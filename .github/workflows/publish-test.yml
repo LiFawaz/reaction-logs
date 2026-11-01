@@ -1,0 +1,88 @@
+name: Build and publish Reaction Logs test feed
+
+on:
+  push:
+    branches:
+      - test/reaction-details-timestamp
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  publish-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Build plugin
+        run: gradle --no-daemon packageReactionLogs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare isolated test repository
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, shutil
+          from pathlib import Path
+
+          manifest = json.loads(Path("plugins/reaction-logs/manifest.json").read_text())
+          plugin_id = manifest["id"]
+          version = manifest["version"]
+          archive = Path(f"build/dist/{plugin_id}@{version}.zip")
+          data = archive.read_bytes()
+
+          publish = Path("publish-test")
+          pool = publish / "pool"
+          pool.mkdir(parents=True)
+          shutil.copy2(archive, pool / archive.name)
+
+          entry = {
+              "url": f"https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages-test/pool/{archive.name}",
+              "sha256": hashlib.sha256(data).hexdigest(),
+              "size": len(data),
+              "dependencies": manifest.get("dependencies", {})
+          }
+          index = {
+              "format": 1,
+              "name": "LiFawaz Reaction Logs TEST",
+              "description": "Isolated test feed. Not the production Reaction Logs repository.",
+              "plugins": {
+                  plugin_id: {
+                      "name": manifest["name"] + " (TEST)",
+                      "description": manifest["description"],
+                      "author": manifest["author"],
+                      "channels": {"latest": version},
+                      "versions": {version: entry}
+                  }
+              }
+          }
+          (publish / "index.json").write_text(json.dumps(index, indent=2) + "\\n", encoding="utf-8")
+          PY
+
+      - name: Publish isolated test feed
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages-test
+          publish_dir: ./publish-test
+          force_orphan: true
