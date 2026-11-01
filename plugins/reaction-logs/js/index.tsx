@@ -1,4 +1,5 @@
 import { Dispatcher } from '@valenced/discord/common/flux'
+import { Stores } from '@valenced/discord/flux'
 import { onFluxEventDispatched } from '@valenced/discord/flux'
 import { getModules } from '@valenced/modules/finders'
 import { withName } from '@valenced/modules/finders/filters'
@@ -25,6 +26,15 @@ interface ReactionPayload {
     optimistic?: boolean
 }
 
+interface DiscordUser {
+    id: string
+    username?: string
+    globalName?: string | null
+    global_name?: string | null
+    avatar?: string | null
+    getAvatarURL?(guildId?: string | null, size?: number): string | number
+}
+
 export default plugin<{ jsonStorage: Settings }>({
     jsonStorage: {
         load: true,
@@ -35,6 +45,7 @@ export default plugin<{ jsonStorage: Settings }>({
         const logs = new Map<string, ReactionLog>()
         const changed = new Set<string>()
         let stopped = false
+        let logSequence = 0
 
         const settings = (): Settings => ({
             ...DefaultSettings,
@@ -43,7 +54,8 @@ export default plugin<{ jsonStorage: Settings }>({
 
         const syncNative = () => {
             try {
-                setRemoved([...logs.keys()])
+                const removedPills = new Set([...logs.values()].map(log => log.pillKey))
+                setRemoved([...removedPills])
             } catch (error) {
                 plugin.reportError('Could not update reaction highlight: ' + String(error))
             }
@@ -78,17 +90,24 @@ export default plugin<{ jsonStorage: Settings }>({
                 ? Number(payload.reactionType)
                 : 0
             const emojiKey = emoji.id ?? emoji.name
-            const key = reactionKey(payload.messageId, emojiKey, reactionType)
+            const pillKey = reactionKey(payload.messageId, emojiKey, reactionType)
+            const now = new Date()
             const log: ReactionLog = {
+                id: pillKey + ':' + now.getTime() + ':' + (++logSequence),
                 messageId: payload.messageId,
                 channelId: payload.channelId,
                 guildId: payload.guildId,
                 emojiKey,
                 reactionType,
-                deletedAt: formatTime(new Date()),
+                pillKey,
+                deletedAt: formatTime(now),
+                deletedAtMs: now.getTime(),
+                removedBy: getRemover(payload.userId, payload.guildId),
             }
 
-            logs.set(key, log)
+            // Each removal gets its own log entry, even when several people remove
+            // the same emoji from one message during this app session.
+            logs.set(log.id, log)
             syncNative()
             rerenderMessage(log)
 
@@ -103,8 +122,8 @@ export default plugin<{ jsonStorage: Settings }>({
                 return handleRemoval(payload)
             }),
 
-            // When the same reaction is added again, consume that add and clear its old tombstone.
-            // This avoids adding to a count that still includes the locally retained reaction.
+            // When the same reaction is added again, consume that add and clear its old tombstones.
+            // This avoids incrementing a count that still includes locally retained reactions.
             onFluxEventDispatched<ReactionPayload>('MESSAGE_REACTION_ADD', payload => {
                 if (!settings().enabled || !payload.emoji?.name || !payload.messageId) return payload
 
@@ -112,12 +131,12 @@ export default plugin<{ jsonStorage: Settings }>({
                     ? Number(payload.reactionType)
                     : 0
                 const key = reactionKey(payload.messageId, payload.emoji.id ?? payload.emoji.name, reactionType)
-                const previous = logs.get(key)
-                if (!previous) return payload
+                const previous = [...logs.values()].filter(log => log.pillKey === key)
+                if (!previous.length) return payload
 
-                logs.delete(key)
+                for (const log of previous) logs.delete(log.id)
                 syncNative()
-                rerenderMessage(previous)
+                rerenderMessage(previous[previous.length - 1]!)
                 return undefined
             }),
 
@@ -135,7 +154,8 @@ export default plugin<{ jsonStorage: Settings }>({
                             }
 
                             return row
-                        }),                    )
+                        }),
+                    )
                 },
             ),
 
@@ -154,6 +174,48 @@ export default plugin<{ jsonStorage: Settings }>({
 
     SettingsComponent,
 })
+
+function getRemover(userId?: string, guildId?: string): ReactionLog['removedBy'] {
+    if (!userId || !/^\d{15,25}$/.test(userId)) return undefined
+
+    try {
+        const stores = Stores as any
+        const user = stores.UserStore?.getUser?.(userId) as DiscordUser | undefined
+        const guildNick = guildId
+            ? stores.GuildMemberStore?.getNick?.(guildId, userId)
+            : undefined
+        const relationshipNick = stores.RelationshipStore?.getNickname?.(userId)
+        const displayName =
+            (typeof guildNick === 'string' && guildNick.trim()) ||
+            (typeof relationshipNick === 'string' && relationshipNick.trim()) ||
+            user?.globalName ||
+            user?.global_name ||
+            user?.username ||
+            userId
+
+        let avatarUrl: string | undefined
+        try {
+            const avatar = user?.getAvatarURL?.(guildId ?? null, 64)
+            if (typeof avatar === 'string' && /^https?:\/\//i.test(avatar)) {
+                avatarUrl = avatar
+            }
+        } catch {
+            // Fall back to the user's global avatar hash below.
+        }
+
+        if (!avatarUrl && typeof user?.avatar === 'string' && user.avatar) {
+            avatarUrl = 'https://cdn.discordapp.com/avatars/' +
+                userId + '/' + user.avatar + '.png?size=64'
+        }
+        if (!avatarUrl) {
+            avatarUrl = 'https://cdn.discordapp.com/embed/avatars/0.png'
+        }
+
+        return { userId, displayName: String(displayName), avatarUrl }
+    } catch {
+        return { userId, displayName: userId }
+    }
+}
 
 function reactionKey(messageId: string, emojiKey: string, reactionType: number) {
     return messageId + ':' + emojiKey + ':' + reactionType
