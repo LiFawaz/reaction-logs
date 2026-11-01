@@ -42,6 +42,10 @@ interface RemoveReactionOptions {
     emoji: Emoji
     location?: string
     userId?: string
+    options?: {
+        burst?: boolean
+        isRetry?: boolean
+    }
 }
 
 interface ReactionActionCreators {
@@ -50,6 +54,10 @@ interface ReactionActionCreators {
         messageId: string,
         emoji: Emoji,
         location?: string,
+        options?: {
+            burst?: boolean
+            isRetry?: boolean
+        },
     ): unknown
     removeReaction(options: RemoveReactionOptions): unknown
     ReactionLocations?: {
@@ -216,7 +224,7 @@ export default plugin<{ jsonStorage: Settings }>({
                                     options.emoji.id
                                         ? options.emoji.name + ':' + options.emoji.id
                                         : options.emoji.name,
-                                    0,
+                                    options.options?.burst ? 1 : 0,
                                 )
 
                                 if (
@@ -239,6 +247,7 @@ export default plugin<{ jsonStorage: Settings }>({
                                     options.messageId,
                                     options.emoji,
                                     location,
+                                    options.options,
                                 )
                             },
                         ),
