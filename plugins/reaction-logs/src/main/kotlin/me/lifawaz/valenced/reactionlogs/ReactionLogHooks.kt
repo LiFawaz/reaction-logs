@@ -134,7 +134,7 @@ internal class ReactionLogHooks(
         unhooks.clear()
         synchronized(removedAtByKey) {
             removedAtByKey.clear()
-            knownReactionEmojis.clear()
+            knownReactionModels.clear()
         }
         mainHandler.post {
             for (popup in removalPopups.values.toList()) {
@@ -309,38 +309,38 @@ internal class ReactionLogHooks(
                 }
             },
             after = { param ->
-            val flexbox = param.thisObject as ViewGroup
-            val reactions = param.args[0] as? List<*> ?: emptyList<Any>()
-            val messageId = bindingMessageId.get()
-            val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
+                val flexbox = param.thisObject as ViewGroup
+                val reactions = param.args[0] as? List<*> ?: emptyList<Any>()
+                val messageId = bindingMessageId.get()
+                val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
 
-            for (index in 0 until flexbox.childCount) {
-                val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
-                val pill = reactionPills.getOrNull(index)
+                for (index in 0 until flexbox.childCount) {
+                    val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
+                    val pill = reactionPills.getOrNull(index)
 
-                if (
-                    pill == null ||
-                    messageId == null ||
-                    pill.count == 0 ||
-                    pill.emoji == null
-                ) {
-                    bound.remove(pillView)
-                    applyStyle(pillView, false)
-                    continue
+                    if (
+                        pill == null ||
+                        messageId == null ||
+                        pill.count == 0 ||
+                        pill.emoji == null
+                    ) {
+                        bound.remove(pillView)
+                        applyStyle(pillView, false)
+                        continue
+                    }
+
+                    val emoji = emojiKey(pill.emoji)
+                    if (emoji.isNullOrBlank()) {
+                        bound.remove(pillView)
+                        applyStyle(pillView, false)
+                        continue
+                    }
+
+                    val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
+                    bound[pillView] = key
+                    applyStyle(pillView, isRemoved(key))
                 }
-
-                val emoji = emojiKey(pill.emoji)
-                if (emoji.isNullOrBlank()) {
-                    bound.remove(pillView)
-                    applyStyle(pillView, false)
-                    continue
-                }
-
-                val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
-                bound[pillView] = key
-                applyStyle(pillView, isRemoved(key))
-            }
-        },
+            },
         )
     }
 
