@@ -29,8 +29,8 @@ import java.util.WeakHashMap
 private const val SHORTCUTS_FLEXBOX = "com.discord.reactions.ShortcutsFlexbox"
 private const val MANAGE_REACTIONS_MODEL_PROVIDER =
     "com.discord.widgets.chat.managereactions.ManageReactionsModelProvider"
-private const val MANAGE_REACTIONS_EMOJI_VIEW_HOLDER =
-    "com.discord.widgets.chat.managereactions.ManageReactionsEmojisAdapter\$ReactionEmojiViewHolder"
+private const val MG_RECYCLER_VIEW_HOLDER =
+    "com.discord.utilities.mg_recycler.MGRecyclerViewHolder"
 private const val REACTION_EMOJI_CONTAINER_ID = "manage_reactions_emoji_container"
 private const val REACTION_EMOJI_VIEW_ID = "manage_reactions_emoji_emoji_textview"
 
@@ -263,50 +263,41 @@ internal class ReactionLogHooks(
             }.getOrNull()
         })
 
-        val holderClass = dexFinder.classLoader.loadClass(MANAGE_REACTIONS_EMOJI_VIEW_HOLDER)
-        val configure = holderClass.declaredMethods.firstOrNull {
-            (it.name == "onConfigure2" || it.name == "onConfigure") &&
+        // Hook the shared RecyclerView holder base instead of a private inner holder.
+        // Discord's emoji-tab holder calls super.onConfigure(position, data), so this
+        // catches the reaction row even when its private holder implementation changes.
+        val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
+        val configure = holderBase.declaredMethods.firstOrNull {
+            it.name == "onConfigure" &&
                 it.parameterCount == 2 &&
                 it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                it.parameterTypes[1].name.contains("ReactionEmojiItem")
-        } ?: error("ReactionEmojiViewHolder.onConfigure not found")
+                it.parameterTypes[1] == Any::class.java
+        } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
         configure.isAccessible = true
 
         unhooks += configure.hook(after = { param ->
-            val itemView = holderItemView(param.thisObject)
-            val container = itemView?.let(::reactionEmojiContainer)
-            if (container != null) {
-                val messageId = detailsMessageId
-                val data = param.args.getOrNull(1)
-                val reaction = data?.let { value ->
-                    runCatching {
-                        value.javaClass.methods.firstOrNull {
-                            it.name == "getReaction" && it.parameterCount == 0
-                        }?.invoke(value)
-                    }.getOrNull()
-                }
-                val emoji = reaction?.let { value ->
-                    runCatching {
-                        value.javaClass.methods.firstOrNull {
-                            it.name == "getEmoji" && it.parameterCount == 0
-                        }?.invoke(value)
-                    }.getOrNull()
-                }
-                val key = if (messageId != null && emoji != null) {
-                    emojiKey(emoji)?.let { "$messageId|$it" }
-                } else {
-                    null
-                }
+            val data = param.args.getOrNull(1) ?: return@hook
+            val reaction = runCatching {
+                data.javaClass.methods.firstOrNull {
+                    it.name == "getReaction" && it.parameterCount == 0
+                }?.invoke(data)
+            }.getOrNull() ?: return@hook
+            val emoji = runCatching {
+                reaction.javaClass.methods.firstOrNull {
+                    it.name == "getEmoji" && it.parameterCount == 0
+                }?.invoke(reaction)
+            }.getOrNull() ?: return@hook
 
-                if (key != null) {
-                    detailKeys[container] = key
-                    applyDetailsTimestamp(container, key)
-                } else {
-                    detailKeys.remove(container)
-                    detailLabels[container]?.visibility = View.GONE
-                }
-            }
+            val itemView = holderItemView(param.thisObject) ?: return@hook
+            val container = reactionEmojiContainer(itemView) ?: return@hook
+            val messageId = detailsMessageId ?: return@hook
+            val key = emojiKey(emoji)?.let { "$messageId|$it" } ?: return@hook
+
+            detailKeys[container] = key
+            applyDetailsTimestamp(container, key)
         })
+
+        XposedBridge.log("Reaction Logs: reaction-details row hook installed")
     }
 
     private fun holderItemView(holder: Any): View? {
@@ -397,7 +388,7 @@ internal class ReactionLogHooks(
             return
         }
 
-        label.text = formatLocalTime(timestamp)
+        label.text = "removed at ${formatLocalTime(timestamp)}"
         label.visibility = View.VISIBLE
     }
 
