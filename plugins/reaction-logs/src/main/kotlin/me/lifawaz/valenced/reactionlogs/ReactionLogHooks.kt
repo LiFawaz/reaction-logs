@@ -2,11 +2,15 @@ package me.lifawaz.valenced.reactionlogs
 
 import android.content.res.ColorStateList
 import android.graphics.Color
-import android.os.Build
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.TextSwitcher
 import android.widget.TextView
 import app.valenced.bridge.ValencedBridge
@@ -27,6 +31,7 @@ private const val SHORTCUTS_FLEXBOX = "com.discord.reactions.ShortcutsFlexbox"
 
 private val REMOVED_RED = Color.rgb(237, 66, 69)
 private val REMOVED_TINT = Color.argb(48, 237, 66, 69)
+private val POPUP_BACKGROUND = Color.rgb(35, 37, 40)
 
 internal class ReactionLogHooks(
     dexFinder: DexFinder,
@@ -44,12 +49,16 @@ internal class ReactionLogHooks(
     private val removedAtByKey = LinkedHashMap<String, RemovedEntry>()
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
+    private val originalLongClickListeners = WeakHashMap<View, View.OnLongClickListener?>()
+    private val removalPopups = WeakHashMap<View, PopupWindow>()
+    private val internalListenerUpdate = ThreadLocal<Boolean>()
     @Volatile private var use24HourClock = false
     private val bindingMessageId = ThreadLocal<String?>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val unhooks = mutableListOf<XC_MethodHook.Unhook>()
 
     init {
+        hookLongClickListeners()
         hookReactionPills(dexFinder)
     }
 
@@ -116,16 +125,52 @@ internal class ReactionLogHooks(
         unhooks.clear()
         synchronized(removedAtByKey) { removedAtByKey.clear() }
         mainHandler.post {
+            for (popup in removalPopups.values.toList()) {
+                runCatching { popup.dismiss() }
+            }
+            removalPopups.clear()
+
             for (pill in bound.keys.toList()) {
                 applyStyle(pill, false)
             }
             bound.clear()
             originalStyles.clear()
+            originalLongClickListeners.clear()
         }
     }
 
     private fun isRemoved(key: String): Boolean =
         synchronized(removedAtByKey) { key in removedAtByKey }
+
+    /**
+     * Remember Discord's original listener before the reaction pill is marked red.
+     * applyStyle can then wrap it without losing Discord's own long-press behavior.
+     */
+    private fun hookLongClickListeners() {
+        val setter = View::class.java.getDeclaredMethod(
+            "setOnLongClickListener",
+            View.OnLongClickListener::class.java,
+        )
+        unhooks += setter.hook(before = { param ->
+            if (internalListenerUpdate.get() != true) {
+                val view = param.thisObject as? View ?: return@hook
+                originalLongClickListeners[view] =
+                    param.args.getOrNull(0) as? View.OnLongClickListener
+            }
+        })
+    }
+
+    private fun setManagedLongClickListener(
+        view: View,
+        listener: View.OnLongClickListener?,
+    ) {
+        internalListenerUpdate.set(true)
+        try {
+            view.setOnLongClickListener(listener)
+        } finally {
+            internalListenerUpdate.remove()
+        }
+    }
 
     private fun hookReactionPills(dexFinder: DexFinder) {
         val accessoryClass = dexFinder.findClass {
@@ -235,20 +280,82 @@ internal class ReactionLogHooks(
         if (removed) {
             view.backgroundTintList = ColorStateList.valueOf(REMOVED_TINT)
             count?.setTextColor(REMOVED_RED)
+            installRemovalLongClick(view, bound[view])
         } else {
             view.backgroundTintList = original.backgroundTint
             original.countColors?.let { count?.setTextColor(it) }
-        }
-
-        // Android's native tooltip appears on long-press and keeps its text on the
-        // view after the popup is dismissed, so the user can open it again.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            view.tooltipText = if (removed) tooltipText(bound[view]) else null
+            restoreOriginalLongClick(view)
         }
     }
 
-    private fun tooltipText(key: String?): String? {
-        if (key.isNullOrBlank()) return null
+    private fun installRemovalLongClick(view: View, key: String?) {
+        if (key.isNullOrBlank()) return
+        val original = originalLongClickListeners[view]
+        setManagedLongClickListener(view, View.OnLongClickListener { target ->
+            // Keep Discord's reaction-details action intact, then show the removal note.
+            runCatching { original?.onLongClick(target) }
+            showRemovalPopup(target, key)
+            true
+        })
+    }
+
+    private fun restoreOriginalLongClick(view: View) {
+        val wasWrapped = originalLongClickListeners.containsKey(view)
+        if (!wasWrapped) return
+        setManagedLongClickListener(view, originalLongClickListeners[view])
+    }
+
+    private fun showRemovalPopup(anchor: View, key: String) {
+        val message = removalText(key) ?: return
+        val density = anchor.resources.displayMetrics.density
+        val label = TextView(anchor.context).apply {
+            text = message
+            setTextColor(REMOVED_RED)
+            setTextSize(11.5f)
+            includeFontPadding = false
+            maxWidth = (240f * density).toInt()
+            setPadding(
+                (10f * density).toInt(),
+                (7f * density).toInt(),
+                (10f * density).toInt(),
+                (7f * density).toInt(),
+            )
+            background = GradientDrawable().apply {
+                setColor(POPUP_BACKGROUND)
+                cornerRadius = 8f * density
+            }
+        }
+
+        val popup = PopupWindow(
+            label,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            true,
+        ).apply {
+            isOutsideTouchable = true
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            elevation = 6f * density
+        }
+
+        removalPopups.remove(anchor)?.let { runCatching { it.dismiss() } }
+        removalPopups[anchor] = popup
+        popup.setOnDismissListener {
+            if (removalPopups[anchor] === popup) removalPopups.remove(anchor)
+        }
+
+        runCatching {
+            popup.showAsDropDown(anchor, anchor.width, -anchor.height)
+        }.onFailure {
+            removalPopups.remove(anchor)
+            XposedBridge.log("Reaction Logs: could not show removal popup: $it")
+        }
+
+        mainHandler.postDelayed({
+            if (popup.isShowing) popup.dismiss()
+        }, 4_500L)
+    }
+
+    private fun removalText(key: String): String? {
         val entry = synchronized(removedAtByKey) { removedAtByKey[key] } ?: return null
         val lines = mutableListOf("removed at ${formatLocalTime(entry.removedAt)}")
         val names = entry.users.map { it.name }.filter { it.isNotBlank() }.distinct()
