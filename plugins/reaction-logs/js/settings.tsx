@@ -1,9 +1,10 @@
 import Page from '@valenced/components/Page'
 import { Design } from '@valenced/discord/design'
 import type { PluginSettingsComponent } from '@valenced/plugins/types'
+import type { ComponentProps } from 'react'
 import type { HistoryStorage, RemovalLogEntry } from './shared'
 
-type SettingsProps = React.ComponentProps<
+type SettingsProps = ComponentProps<
     PluginSettingsComponent<{ jsonStorage: HistoryStorage }>
 >
 
