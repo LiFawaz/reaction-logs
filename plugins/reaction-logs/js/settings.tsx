@@ -26,7 +26,7 @@ export default function SettingsComponent({
         <Page>
             <TableRadioGroup
                 title="Timestamp clock"
-                description="Long-press a red reaction to show when it was removed and the user whose reaction disappeared. Uses your phone's local timezone."
+                description="Long-press a red reaction to show when it was removed and whose reaction disappeared. The red row stays visible even when its count reaches zero. Uses your phone's local timezone."
                 value={clockFormat}
                 onChange={changeClockFormat}
             >

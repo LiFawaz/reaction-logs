@@ -47,6 +47,8 @@ internal class ReactionLogHooks(
     )
 
     private val removedAtByKey = LinkedHashMap<String, RemovedEntry>()
+    /** Last real reaction model observed before Discord drops a zero-count row. */
+    private val knownReactionModels = LinkedHashMap<String, Any>()
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
     private val originalLongClickListeners = WeakHashMap<View, View.OnLongClickListener?>()
@@ -94,6 +96,9 @@ internal class ReactionLogHooks(
         synchronized(removedAtByKey) {
             removedAtByKey.clear()
             removedAtByKey.putAll(parsed)
+            synchronized(knownReactionModels) {
+                knownReactionModels.keys.retainAll(parsed.keys)
+            }
         }
 
         mainHandler.post {
@@ -114,6 +119,7 @@ internal class ReactionLogHooks(
 
     fun clear() {
         synchronized(removedAtByKey) { removedAtByKey.clear() }
+        synchronized(knownReactionModels) { knownReactionModels.clear() }
         mainHandler.post {
             for ((pill, key) in bound.entries.toList()) {
                 applyStyle(pill, false)
@@ -125,6 +131,7 @@ internal class ReactionLogHooks(
         unhooks.forEach { it.unhook() }
         unhooks.clear()
         synchronized(removedAtByKey) { removedAtByKey.clear() }
+        synchronized(knownReactionModels) { knownReactionModels.clear() }
         mainHandler.post {
             for (popup in removalPopups.values.toList()) {
                 runCatching { popup.dismiss() }
@@ -238,39 +245,132 @@ internal class ReactionLogHooks(
             after = { bindingMessageId.remove() },
         )
 
-        unhooks += setReactions.hook(after = { param ->
-            val flexbox = param.thisObject as ViewGroup
-            val reactions = param.args[0] as? List<*> ?: emptyList<Any>()
-            val messageId = bindingMessageId.get()
-            val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
+        unhooks += setReactions.hook(
+            before = { param ->
+                val originalReactions = param.args.getOrNull(0) as? List<*> ?: return@hook
+                val messageId = bindingMessageId.get() ?: return@hook
+                val currentKeys = LinkedHashSet<String>()
 
-            for (index in 0 until flexbox.childCount) {
-                val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
-                val pill = reactionPills.getOrNull(index)
+                // Cache each full concrete model while it is still in Discord's
+                // message reaction list. We can then clone it as a local 1-count row
+                // if the server removes the final reaction.
+                for (reaction in originalReactions) {
+                    if (reaction == null) continue
+                    val emoji = runCatching { getEmoji.invoke(reaction) }.getOrNull() ?: continue
+                    val emojiPart = emojiKey(emoji) ?: continue
+                    val count = runCatching { getCount.invoke(reaction) as Int }.getOrDefault(0)
+                    val burstCount = runCatching { getBurstCount.invoke(reaction) as Int }.getOrDefault(0)
 
-                if (
-                    pill == null ||
-                    messageId == null ||
-                    pill.count == 0 ||
-                    pill.emoji == null
-                ) {
-                    bound.remove(pillView)
-                    applyStyle(pillView, false)
-                    continue
+                    if (count > 0) {
+                        val key = reactionKey(messageId, emojiPart, 0)
+                        currentKeys.add(key)
+                        synchronized(knownReactionModels) {
+                            knownReactionModels[key] = reaction
+                        }
+                    }
+                    if (burstCount > 0) {
+                        val key = reactionKey(messageId, emojiPart, 1)
+                        currentKeys.add(key)
+                        synchronized(knownReactionModels) {
+                            knownReactionModels[key] = reaction
+                        }
+                    }
                 }
 
-                val emoji = emojiKey(pill.emoji)
-                if (emoji.isNullOrBlank()) {
-                    bound.remove(pillView)
-                    applyStyle(pillView, false)
-                    continue
+                val missingKeys = synchronized(removedAtByKey) {
+                    removedAtByKey.keys.filter { key ->
+                        key.startsWith("$messageId|") && key !in currentKeys
+                    }
                 }
+                if (missingKeys.isNotEmpty()) {
+                    val synthetic = missingKeys.mapNotNull { key ->
+                        val model = synchronized(knownReactionModels) {
+                            knownReactionModels[key]
+                        } ?: return@mapNotNull null
+                        val burst = key.substringAfterLast('|') == "1"
+                        createSyntheticReaction(model, getEmoji, burst)
+                    }
 
-                val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
-                bound[pillView] = key
-                applyStyle(pillView, isRemoved(key))
-            }
-        })
+                    if (synthetic.isNotEmpty()) {
+                        // The server-side count can be zero, but the client keeps a
+                        // local red row with me=false so it can be tapped to react again.
+                        param.args[0] = ArrayList<Any?>(originalReactions.size + synthetic.size).apply {
+                            addAll(originalReactions)
+                            addAll(synthetic)
+                        }
+                        XposedBridge.log(
+                            "Reaction Logs: retained ${synthetic.size} removed reaction row(s) for message $messageId",
+                        )
+                    }
+                }
+            },
+            after = { param ->
+                val flexbox = param.thisObject as ViewGroup
+                val reactions = param.args[0] as? List<*> ?: emptyList<Any>()
+                val messageId = bindingMessageId.get()
+                val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
+
+                for (index in 0 until flexbox.childCount) {
+                    val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
+                    val pill = reactionPills.getOrNull(index)
+
+                    if (
+                        pill == null ||
+                        messageId == null ||
+                        pill.count == 0 ||
+                        pill.emoji == null
+                    ) {
+                        bound.remove(pillView)
+                        applyStyle(pillView, false)
+                        continue
+                    }
+
+                    val emoji = emojiKey(pill.emoji)
+                    if (emoji.isNullOrBlank()) {
+                        bound.remove(pillView)
+                        applyStyle(pillView, false)
+                        continue
+                    }
+
+                    val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
+                    bound[pillView] = key
+                    applyStyle(pillView, isRemoved(key))
+                }
+            },
+        )
+    }
+
+    /**
+     * Clone Discord's real MessageReaction model so the RecyclerView receives a
+     * valid ItemDiffableType with a stable item ID. A proxy is not sufficient here:
+     * RecyclerView's diffing and ReactionView both rely on the model defaults.
+     */
+    private fun createSyntheticReaction(
+        model: Any,
+        getEmoji: Method,
+        burst: Boolean,
+    ): Any? {
+        return runCatching {
+            val methods = model.javaClass.methods
+            val copy = methods.firstOrNull { it.name == "copy" && it.parameterCount == 6 }
+                ?: error("Reaction model copy method not found on ${model.javaClass.name}")
+            val emoji = getEmoji.invoke(model)
+            val themedColors = methods.firstOrNull {
+                it.name == "getThemedBurstColors" && it.parameterCount == 0
+            }?.invoke(model)
+
+            copy.invoke(
+                model,
+                if (burst) 0 else 1,
+                false,
+                false,
+                emoji,
+                if (burst) 1 else 0,
+                themedColors,
+            )
+        }.onFailure {
+            XposedBridge.log("Reaction Logs: could not retain removed reaction model: $it")
+        }.getOrNull()
     }
 
     private fun applyStyle(view: LinearLayout, removed: Boolean) {
@@ -292,11 +392,9 @@ internal class ReactionLogHooks(
 
     private fun installRemovalLongClick(view: View, key: String?) {
         if (key.isNullOrBlank()) return
-        val original = originalLongClickListeners[view]
         wrappedLongClickListeners[view] = true
         setManagedLongClickListener(view, View.OnLongClickListener { target ->
-            // Keep Discord's reaction-details action intact, then show the removal note.
-            runCatching { original?.onLongClick(target) }
+            // Show the saved log beside the red reaction without opening a competing sheet.
             showRemovalPopup(target, key)
             true
         })
