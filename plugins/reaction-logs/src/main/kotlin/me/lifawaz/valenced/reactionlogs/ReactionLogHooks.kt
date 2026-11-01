@@ -435,6 +435,7 @@ internal class ReactionLogHooks(
         val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
 
         val host = placement.host
+        ensureDetailsLabel(host, placement.anchor, emojiView)
         detailKeys[host] = key
         detailLogOnce(
             "row-bound",
@@ -585,17 +586,13 @@ internal class ReactionLogHooks(
         }
         val margin = (4f * host.resources.displayMetrics.density).toInt()
         val insertIndex = (host.indexOfChild(anchor) + 1).coerceIn(0, host.childCount)
-        host.addView(
-            label,
-            insertIndex,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                marginStart = margin
-                gravity = Gravity.CENTER_VERTICAL
-            },
-        )
+        host.addView(label, insertIndex)
+        label.layoutParams = label.layoutParams.apply {
+            width = ViewGroup.LayoutParams.WRAP_CONTENT
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+            if (this is ViewGroup.MarginLayoutParams) marginStart = margin
+            if (this is LinearLayout.LayoutParams) gravity = Gravity.CENTER_VERTICAL
+        }
         detailLabels[host] = label
         return label
     }
