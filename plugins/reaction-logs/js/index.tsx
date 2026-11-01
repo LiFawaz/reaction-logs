@@ -10,19 +10,19 @@ interface Emoji {
 interface ReactionPayload {
     channelId: string
     messageId: string
-    guildId?: string
-    userId?: string
     emoji?: Emoji
     reactionType?: number
 }
 
 export default plugin({
     start({ cleanup, plugin }) {
-        const removedKeys = new Set<string>()
+        // Track each blocked removal separately. A Set loses information when
+        // multiple users remove the same emoji before someone adds it again.
+        const pendingRemovals = new Map<string, number>()
 
         const syncNative = () => {
             try {
-                const entries = [...removedKeys].map(pillKey => ({ pillKey }))
+                const entries = [...pendingRemovals.keys()].map(pillKey => ({ pillKey }))
                 setRemoved(JSON.stringify(entries))
             } catch (error) {
                 plugin.reportError('Failed to refresh reaction logs: ' + String(error))
@@ -47,10 +47,11 @@ export default plugin({
                     const key = makeKey(payload)
                     if (!key || !payload.channelId) return payload
 
-                    removedKeys.add(key)
+                    pendingRemovals.set(key, (pendingRemovals.get(key) ?? 0) + 1)
                     syncNative()
 
                     // Keep the removed reaction visible in this client only.
+                    // Its matching add event is balanced below.
                     return undefined
                 },
             ),
@@ -59,18 +60,28 @@ export default plugin({
                 'MESSAGE_REACTION_ADD',
                 payload => {
                     const key = makeKey(payload)
-                    if (!key || !removedKeys.has(key)) return payload
+                    if (!key) return payload
 
-                    removedKeys.delete(key)
+                    const pending = pendingRemovals.get(key) ?? 0
+                    if (pending <= 0) return payload
+
+                    // Balance exactly one previously blocked removal. If more
+                    // removals are still pending, keep the pill marked red.
+                    if (pending === 1) {
+                        pendingRemovals.delete(key)
+                    } else {
+                        pendingRemovals.set(key, pending - 1)
+                    }
                     syncNative()
 
-                    // The locally retained count already includes this reaction.
+                    // The local count already contains the blocked removal, so
+                    // block this matching add to keep it aligned with the server.
                     return undefined
                 },
             ),
 
             () => {
-                removedKeys.clear()
+                pendingRemovals.clear()
                 try {
                     clearRemoved()
                 } catch (error) {
