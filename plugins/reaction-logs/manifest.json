@@ -4,7 +4,7 @@
   "name": "Reaction Logs",
   "author": "Li Fawaz",
   "description": "Save removed reactions in a persistent history, independent of reaction pills.",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
