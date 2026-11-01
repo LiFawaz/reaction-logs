@@ -118,10 +118,8 @@ internal class ReactionLogHooks(
     }
 
     fun clear() {
-        synchronized(removedAtByKey) {
-            removedAtByKey.clear()
-            knownReactionModels.clear()
-        }
+        synchronized(removedAtByKey) { removedAtByKey.clear() }
+        synchronized(knownReactionModels) { knownReactionModels.clear() }
         mainHandler.post {
             for ((pill, key) in bound.entries.toList()) {
                 applyStyle(pill, false)
@@ -132,10 +130,8 @@ internal class ReactionLogHooks(
     fun dispose() {
         unhooks.forEach { it.unhook() }
         unhooks.clear()
-        synchronized(removedAtByKey) {
-            removedAtByKey.clear()
-            knownReactionModels.clear()
-        }
+        synchronized(removedAtByKey) { removedAtByKey.clear() }
+        synchronized(knownReactionModels) { knownReactionModels.clear() }
         mainHandler.post {
             for (popup in removalPopups.values.toList()) {
                 runCatching { popup.dismiss() }
