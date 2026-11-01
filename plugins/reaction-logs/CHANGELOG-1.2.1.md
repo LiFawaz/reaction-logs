@@ -1,8 +1,8 @@
 # Reaction Logs 1.2.1
 
-- Recreate a local red reaction row when Discord removes the final server reaction from the message.
-- Clone Discord's concrete reaction model so the retained row remains compatible with RecyclerView diffing and reaction interactions.
-- Keep the retained row non-selected, allowing the current user to add the reaction again.
-- Show the saved removal time and affected reaction user in a popup beside the red pill on long-press.
-- Dismissing the popup leaves the log available for the next long-press.
-- Build and package validation do not confirm on-device rendering or tap behavior.
+- Keep the local reaction removal event from immediately deleting the red pill from the message row.
+- Preserve the removed reaction count locally until the same affected user adds the reaction again, or the message/reaction is cleared.
+- When the current user's red retained reaction is tapped again, route the stale remove action to an add action so the reaction can be restored.
+- Balance the matching optimistic add and gateway echo without double-counting the retained local pill.
+- Preserve normal and burst reaction types.
+- Build and package validation do not confirm on-device interaction behavior.
