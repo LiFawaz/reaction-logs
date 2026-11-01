@@ -247,12 +247,12 @@ internal class ReactionLogHooks(
     }
 
     private fun hookReactionDetails(dexFinder: DexFinder) {
-        // Match the popup's row data model by its stable Kotlin data-class string.
-        // This is the same DexFinder anchor pattern used by Valenced's who-reacted plugin.
         val emojiItemClass = dexFinder.findClass {
             matcher { addUsingString(REACTION_EMOJI_ITEM_PREFIX) }
         } ?: error("ReactionEmojiItem data class not found")
 
+        // ReactionEmojiItem has one object field (MessageReaction); MessageReaction
+        // has one object field (MessageReactionEmoji). Resolve by field shape only.
         val reactionField = emojiItemClass.declaredFields.singleOrNull {
             !Modifier.isStatic(it.modifiers) &&
                 !it.type.isPrimitive &&
@@ -260,8 +260,6 @@ internal class ReactionLogHooks(
         } ?: error("ReactionEmojiItem reaction field not found")
         reactionField.isAccessible = true
 
-        // MessageReaction contains one reference field: its MessageReactionEmoji.
-        // Determine it from runtime field types rather than R8-renamed getters.
         val emojiField = reactionField.type.declaredFields.singleOrNull {
             !Modifier.isStatic(it.modifiers) &&
                 !it.type.isPrimitive &&
@@ -269,8 +267,6 @@ internal class ReactionLogHooks(
         } ?: error("MessageReaction emoji field not found")
         emojiField.isAccessible = true
 
-        // The row's specialized configure method runs after RecyclerView assigned
-        // the data item. Hook it after binding, then update that row's native view.
         val configure = dexFinder.findMethod {
             matcher {
                 paramCount(2)
@@ -278,17 +274,43 @@ internal class ReactionLogHooks(
             }
         } ?: error("Reaction emoji row configure method not found")
 
+        // Delay until Discord finishes rendering the emoji and counter.
         unhooks += configure.hook(after = { param ->
-            bindDetailsRow(
-                param.thisObject,
-                param.args.getOrNull(1),
-                reactionField,
-                emojiField,
-            )
+            val holder = param.thisObject
+            val data = param.args.getOrNull(1)
+            if (data != null && emojiItemClass.isInstance(data)) {
+                mainHandler.post {
+                    bindDetailsRow(holder, data, reactionField, emojiField)
+                }
+            }
         })
 
-        // Capture the message ID at the exact point Discord opens the popup.
-        // The second long argument is the message ID; the first is channel ID.
+        // Hook the generic RecyclerView holder method too. It catches builds where
+        // DexFinder finds a typed bridge but Android dispatches through the base binder.
+        val genericConfigure = generateSequence(configure.declaringClass) { it.superclass }
+            .flatMap { it.declaredMethods.asSequence() }
+            .firstOrNull { method ->
+                method.name == "onConfigure" &&
+                    method.parameterCount == 2 &&
+                    method.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    method.parameterTypes[1] == Any::class.java
+            }
+
+        if (genericConfigure != null && genericConfigure != configure) {
+            genericConfigure.isAccessible = true
+            unhooks += genericConfigure.hook(after = { param ->
+                val holder = param.thisObject
+                val data = param.args.getOrNull(1)
+                if (data != null && emojiItemClass.isInstance(data)) {
+                    mainHandler.post {
+                        bindDetailsRow(holder, data, reactionField, emojiField)
+                    }
+                }
+            })
+        }
+
+        // Prefer message ID from the popup launcher; the row's Activity context is
+        // checked independently in bindDetailsRow as a fallback.
         val popupOpener = dexFinder.findMethod {
             matcher {
                 paramCount(4)
@@ -315,79 +337,12 @@ internal class ReactionLogHooks(
             })
         }
 
-        // Compatibility fallback for builds where Discord changed the popup
-        // launch signature. Use addUsingString because lifecycle methods can
-        // contain multiple EXTRA_* constants.
-        val popupLifecycleHooks = listOfNotNull(
-            dexFinder.findMethod {
-                matcher {
-                    name("onViewCreated")
-                    paramCount(2)
-                    addUsingString(REACTION_MESSAGE_EXTRA)
-                }
-            },
-            dexFinder.findMethod {
-                matcher {
-                    name("onViewBound")
-                    paramCount(1)
-                    addUsingString(REACTION_MESSAGE_EXTRA)
-                }
-            },
-        ).distinct()
-
-        for (method in popupLifecycleHooks) {
-            unhooks += method.hook(after = { param ->
-                val messageId = readDetailsMessageId(param.thisObject)
-                if (!messageId.isNullOrBlank()) detailsMessageId = messageId
-                XposedBridge.log(
-                    "Reaction Logs: popup lifecycle captured message " +
-                        (detailsMessageId ?: "unavailable"),
-                )
-            })
-        }
-
-        if (popupOpener == null && popupLifecycleHooks.isEmpty()) {
-            XposedBridge.log(
-                "Reaction Logs: WARNING: popup row hook installed but message ID hook was not found",
-            )
-        }
-
         XposedBridge.log(
-            "Reaction Logs: popup row hook installed (row=" +
+            "Reaction Logs: reaction row hooks installed (typed=" +
                 configure.declaringClass.name + "." + configure.name +
-                ", opener=" + (popupOpener != null) +
-                ", lifecycle=" + popupLifecycleHooks.size + ")",
+                ", generic=" + (genericConfigure != null) +
+                ", opener=" + (popupOpener != null) + ")",
         )
-    }
-
-    private fun readDetailsMessageId(fragment: Any): String? {
-        val arguments = invokeNoArgs(fragment, "getArguments") as? android.os.Bundle
-        val argumentId = runCatching {
-            arguments?.getLong(REACTION_MESSAGE_EXTRA, 0L) ?: 0L
-        }.getOrDefault(0L)
-        if (argumentId > 0L) return argumentId.toString()
-
-        // Older Discord popup implementations read the message ID from the host Intent.
-        val intent = invokeNoArgs(fragment, "getMostRecentIntent") as? android.content.Intent
-        val intentId = runCatching {
-            intent?.getLongExtra(REACTION_MESSAGE_EXTRA, 0L) ?: 0L
-        }.getOrDefault(0L)
-        return intentId.takeIf { it > 0L }?.toString()
-    }
-
-    private fun invokeNoArgs(target: Any, methodName: String): Any? {
-        val method = generateSequence(target.javaClass) { it.superclass }
-            .flatMap { it.declaredMethods.asSequence() }
-            .firstOrNull { it.name == methodName && it.parameterCount == 0 }
-            ?: target.javaClass.methods.firstOrNull {
-                it.name == methodName && it.parameterCount == 0
-            }
-            ?: return null
-
-        return runCatching {
-            method.isAccessible = true
-            method.invoke(target)
-        }.getOrNull()
     }
 
     private fun bindDetailsRow(
@@ -403,11 +358,26 @@ internal class ReactionLogHooks(
         val itemView = holderItemView(holder) ?: return
         val container = reactionEmojiContainer(itemView) ?: return
         val emojiPart = emojiKey(emoji) ?: return
-        val messageId = detailsMessageId
+        val messageId = readMessageIdFromContext(itemView.context) ?: detailsMessageId
         val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
 
         detailKeys[container] = key
         applyDetailsTimestamp(container, key)
+    }
+
+    private fun readMessageIdFromContext(context: android.content.Context): String? {
+        var current: android.content.Context? = context
+        val visited = HashSet<android.content.Context>()
+        while (current != null && visited.add(current)) {
+            if (current is android.app.Activity) {
+                val id = runCatching {
+                    current.intent?.getLongExtra(REACTION_MESSAGE_EXTRA, 0L) ?: 0L
+                }.getOrDefault(0L)
+                if (id > 0L) return id.toString()
+            }
+            current = (current as? android.content.ContextWrapper)?.baseContext
+        }
+        return null
     }
 
     private fun holderItemView(holder: Any): View? {
@@ -534,11 +504,7 @@ internal class ReactionLogHooks(
                     val parts = entry.key.split('|')
                     parts.size == 3 && parts[1] == emojiPart && entry.value > 0L
                 }
-                if (matches.map { it.key.substringBefore('|') }.distinct().size == 1) {
-                    matches.maxOfOrNull { it.value }
-                } else {
-                    null
-                }
+                matches.maxOfOrNull { it.value }
             }
         }
         val label = detailLabels[container] ?: return
@@ -600,9 +566,9 @@ internal class ReactionLogHooks(
         if (id != null) return id
 
         val text = emoji.toString()
-        val parsedId = ID_PATTERN.find(text)?.groupValues?.get(1)?.takeIf { it != "null" }
+        val parsedId = ID_PATTERN.find(text)?.groupValues?.get(1)?.takeIf { it.isNotBlank() && it != "null" }
         val parsedName = NAME_PATTERN.find(text)?.groupValues?.get(1)
-            ?: FALLBACK_NAME_PATTERN.find(text)?.groupValues?.get(1)
+            ?.takeIf { it.isNotBlank() && it != "null" }
         return when {
             parsedName != null && parsedId != null -> "$parsedName:$parsedId"
             parsedName != null -> parsedName
@@ -611,9 +577,8 @@ internal class ReactionLogHooks(
     }
 
     private companion object {
-        val ID_PATTERN = Regex(""", id=([^,)]*)""")
-        val NAME_PATTERN = Regex("""\(name=(.*?), src=""")
-        val FALLBACK_NAME_PATTERN = Regex("""\(name=([^,)]*)""")
+        val ID_PATTERN = Regex("""(?:\\(|, )id=([^,)]*)""")
+        val NAME_PATTERN = Regex("""(?:\\(|, )name=([^,)]*)""")
     }
 }
 
