@@ -179,7 +179,9 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 payload => {
                     const key = makeKey(payload)
                     if (key) recordRemoval(payload, key)
-                    return payload
+                    // Match the original working implementation: prevent Discord
+                    // from removing the local reaction pill. We only recolor it.
+                    return undefined
                 },
             ),
 
@@ -195,6 +197,9 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                     if (clearActiveForKey(key)) {
                         persistHistory()
                         syncNative()
+                        // The retained local pill already represents this reaction.
+                        // Swallow the add event so Discord does not change its count.
+                        return undefined
                     }
                     return payload
                 },
