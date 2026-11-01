@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Keep removed reactions visible locally, mark them red, and log who removed them with a clickable profile mention.",
-  "version": "1.0.2",
+  "description": "Keep removed reactions visible locally, mark them red, and log who removed them with a clickable avatar and profile mention.",
+  "version": "1.0.3",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
