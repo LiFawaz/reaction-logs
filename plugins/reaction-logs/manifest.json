@@ -4,7 +4,7 @@
   "name": "Reaction Logs",
   "author": "Li Fawaz",
   "description": "Mark removed reactions red and show their removal time and affected user on long-press.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
