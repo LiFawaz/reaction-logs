@@ -396,11 +396,9 @@ internal class ReactionLogHooks(
 
     private fun installRemovalLongClick(view: View, key: String?) {
         if (key.isNullOrBlank()) return
-        val original = originalLongClickListeners[view]
         wrappedLongClickListeners[view] = true
         setManagedLongClickListener(view, View.OnLongClickListener { target ->
-            // Keep Discord's reaction-details action intact, then show the removal note.
-            runCatching { original?.onLongClick(target) }
+            // Show the saved log beside the red reaction without opening a competing sheet.
             showRemovalPopup(target, key)
             true
         })
