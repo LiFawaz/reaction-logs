@@ -1,4 +1,4 @@
-import { Stores, onFluxEventDispatched } from '@valenced/discord/flux'
+import { onFluxEventDispatched } from '@valenced/discord/flux'
 import { setRemoved, clearRemoved } from './native'
 
 interface Emoji {
