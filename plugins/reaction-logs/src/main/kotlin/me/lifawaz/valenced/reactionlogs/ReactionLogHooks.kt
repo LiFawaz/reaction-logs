@@ -247,51 +247,12 @@ internal class ReactionLogHooks(
     }
 
     private fun hookReactionDetails(dexFinder: DexFinder) {
-        // Discord 352.2+ obfuscates private class and member names. Find the
-        // popup lifecycle callback by the stable EXTRA_MESSAGE_ID literal.
-        val popupLifecycleHooks = listOfNotNull(
-            dexFinder.findMethod {
-                matcher {
-                    name("onViewCreated")
-                    paramCount(2)
-                    usingEqStrings(REACTION_MESSAGE_EXTRA)
-                }
-            },
-            dexFinder.findMethod {
-                matcher {
-                    name("onViewBound")
-                    paramCount(1)
-                    usingEqStrings(REACTION_MESSAGE_EXTRA)
-                }
-            },
-        ).distinct()
-
-        if (popupLifecycleHooks.isEmpty()) {
-            error("Manage reactions popup lifecycle method not found")
-        }
-
-        for (method in popupLifecycleHooks) {
-            unhooks += method.hook(after = { param ->
-                detailsMessageId = readDetailsMessageId(param.thisObject)
-                XposedBridge.log(
-                    "Reaction Logs: reaction popup message ID " +
-                        (detailsMessageId ?: "unavailable"),
-                )
-            })
-        }
-
-        // ReactionEmojiItem is a Kotlin data class. Its toString prefix is
-        // stable even when R8 changes the actual class name.
+        // Match the popup's row data model by its stable Kotlin data-class string.
+        // This is the same DexFinder anchor pattern used by Valenced's who-reacted plugin.
         val emojiItemClass = dexFinder.findClass {
             matcher { addUsingString(REACTION_EMOJI_ITEM_PREFIX) }
         } ?: error("ReactionEmojiItem data class not found")
 
-        val emojiClass = dexFinder.findClass {
-            matcher { addUsingString("MessageReactionEmoji(name=") }
-        } ?: error("MessageReactionEmoji data class not found")
-
-        // Avoid reflective getter names: R8 can rename getReaction/getEmoji.
-        // The item has exactly one non-primitive, non-String field: MessageReaction.
         val reactionField = emojiItemClass.declaredFields.singleOrNull {
             !Modifier.isStatic(it.modifiers) &&
                 !it.type.isPrimitive &&
@@ -299,15 +260,17 @@ internal class ReactionLogHooks(
         } ?: error("ReactionEmojiItem reaction field not found")
         reactionField.isAccessible = true
 
-        // The emoji field is found by its runtime type, not its potentially
-        // obfuscated field name.
+        // MessageReaction contains one reference field: its MessageReactionEmoji.
+        // Determine it from runtime field types rather than R8-renamed getters.
         val emojiField = reactionField.type.declaredFields.singleOrNull {
-            !Modifier.isStatic(it.modifiers) && it.type == emojiClass
+            !Modifier.isStatic(it.modifiers) &&
+                !it.type.isPrimitive &&
+                it.type != String::class.java
         } ?: error("MessageReaction emoji field not found")
         emojiField.isAccessible = true
 
-        // Find the specialized onConfigure(position, ReactionEmojiItem) method.
-        // This avoids relying on the obfuscated RecyclerView holder class name.
+        // The row's specialized configure method runs after RecyclerView assigned
+        // the data item. Hook it after binding, then update that row's native view.
         val configure = dexFinder.findMethod {
             matcher {
                 paramCount(2)
@@ -324,10 +287,76 @@ internal class ReactionLogHooks(
             )
         })
 
+        // Capture the message ID at the exact point Discord opens the popup.
+        // The second long argument is the message ID; the first is channel ID.
+        val popupOpener = dexFinder.findMethod {
+            matcher {
+                paramCount(4)
+                paramTypes(
+                    "long",
+                    "long",
+                    "android.content.Context",
+                    reactionField.type.name,
+                )
+                addUsingString(REACTION_MESSAGE_EXTRA)
+            }
+        }
+
+        if (popupOpener != null) {
+            unhooks += popupOpener.hook(after = { param ->
+                detailsMessageId = (param.args.getOrNull(1) as? Number)
+                    ?.toLong()
+                    ?.takeIf { it > 0L }
+                    ?.toString()
+                XposedBridge.log(
+                    "Reaction Logs: popup opener captured message " +
+                        (detailsMessageId ?: "unavailable"),
+                )
+            })
+        }
+
+        // Compatibility fallback for builds where Discord changed the popup
+        // launch signature. Use addUsingString because lifecycle methods can
+        // contain multiple EXTRA_* constants.
+        val popupLifecycleHooks = listOfNotNull(
+            dexFinder.findMethod {
+                matcher {
+                    name("onViewCreated")
+                    paramCount(2)
+                    addUsingString(REACTION_MESSAGE_EXTRA)
+                }
+            },
+            dexFinder.findMethod {
+                matcher {
+                    name("onViewBound")
+                    paramCount(1)
+                    addUsingString(REACTION_MESSAGE_EXTRA)
+                }
+            },
+        ).distinct()
+
+        for (method in popupLifecycleHooks) {
+            unhooks += method.hook(after = { param ->
+                val messageId = readDetailsMessageId(param.thisObject)
+                if (!messageId.isNullOrBlank()) detailsMessageId = messageId
+                XposedBridge.log(
+                    "Reaction Logs: popup lifecycle captured message " +
+                        (detailsMessageId ?: "unavailable"),
+                )
+            })
+        }
+
+        if (popupOpener == null && popupLifecycleHooks.isEmpty()) {
+            XposedBridge.log(
+                "Reaction Logs: WARNING: popup row hook installed but message ID hook was not found",
+            )
+        }
+
         XposedBridge.log(
-            "Reaction Logs: obfuscation-aware popup hooks installed " +
-                "(lifecycle=" + popupLifecycleHooks.size +
-                ", row=" + configure.declaringClass.name + "." + configure.name + ")",
+            "Reaction Logs: popup row hook installed (row=" +
+                configure.declaringClass.name + "." + configure.name +
+                ", opener=" + (popupOpener != null) +
+                ", lifecycle=" + popupLifecycleHooks.size + ")",
         )
     }
 
