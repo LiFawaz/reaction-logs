@@ -91,28 +91,25 @@ export default plugin<{ jsonStorage: Settings }>({
                 : 0
             const emojiKey = emoji.id ?? emoji.name
             const pillKey = reactionKey(payload.messageId, emojiKey, reactionType)
-            const now = new Date()
+            const now = Date.now()
             const log: ReactionLog = {
-                id: pillKey + ':' + now.getTime() + ':' + (++logSequence),
+                id: pillKey + ':' + now + ':' + (++logSequence),
                 messageId: payload.messageId,
                 channelId: payload.channelId,
                 guildId: payload.guildId,
                 emojiKey,
                 reactionType,
                 pillKey,
-                deletedAt: formatTime(now),
-                deletedAtMs: now.getTime(),
+                deletedAtMs: now,
                 removedBy: getRemover(payload.userId, payload.guildId),
             }
 
-            // Each removal gets its own log entry, even when several people remove
-            // the same emoji from one message during this app session.
+            // Keep each removal as a separate local entry for this app session.
             logs.set(log.id, log)
             syncNative()
             rerenderMessage(log)
 
-            // Stop Discord from removing the reaction from this client.
-            // The server event still happened; a full Discord reload syncs the real state.
+            // Discord still processes the server-side change. This only retains the pill locally.
             return undefined
         }
 
@@ -122,8 +119,7 @@ export default plugin<{ jsonStorage: Settings }>({
                 return handleRemoval(payload)
             }),
 
-            // When the same reaction is added again, consume that add and clear its old tombstones.
-            // This avoids incrementing a count that still includes locally retained reactions.
+            // A later add clears the local tombstone for that emoji.
             onFluxEventDispatched<ReactionPayload>('MESSAGE_REACTION_ADD', payload => {
                 if (!settings().enabled || !payload.emoji?.name || !payload.messageId) return payload
 
@@ -219,9 +215,4 @@ function getRemover(userId?: string, guildId?: string): ReactionLog['removedBy']
 
 function reactionKey(messageId: string, emojiKey: string, reactionType: number) {
     return messageId + ':' + emojiKey + ':' + reactionType
-}
-
-function formatTime(date: Date) {
-    return String(date.getHours()).padStart(2, '0') + ':' +
-        String(date.getMinutes()).padStart(2, '0')
 }
