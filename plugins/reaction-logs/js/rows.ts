@@ -1,12 +1,22 @@
 import type { Settings } from './shared'
 
+export interface ReactionRemover {
+    userId: string
+    displayName: string
+    avatarUrl?: string
+}
+
 export interface ReactionLog {
+    id: string
     messageId: string
     channelId: string
     guildId?: string
     emojiKey: string
     reactionType: number
+    pillKey: string
     deletedAt: string
+    deletedAtMs: number
+    removedBy?: ReactionRemover
 }
 
 export interface RowManager {
@@ -49,6 +59,7 @@ const ColorStart = ''
 const ColorSeparator = ''
 const ColorEnd = ''
 const DeletedColor = (0xFFED4245 | 0).toString()
+const GeneratedNode = 'reactionLogsGenerated'
 
 export function styleRow(
     row: MessageRow,
@@ -62,28 +73,70 @@ export function styleRow(
     if (changed.delete(messageId)) row.changeType = UpdateChangeType
 
     const existing = Array.isArray(row.message.content) ? row.message.content : []
-    // RowManager can regenerate a row from an object that already contains our labels.
-    // Strip old labels first so repeated renders never stack duplicate timestamps.
+    // Strip our previous output before rebuilding it. This prevents duplicate names,
+    // avatars and timestamps when Discord regenerates the same row object.
     const baseContent = existing.filter(node =>
+        node?.[GeneratedNode] !== true &&
         !(node?.type === 'text' && typeof node.content === 'string' &&
             node.content.includes(ColorStart) && node.content.includes('Reaction deleted at ') &&
             node.content.includes(ColorEnd)),
     )
-    if (baseContent.length !== existing.length) row.message.content = baseContent
 
-    if (!settings().enabled) return
+    if (!settings().enabled) {
+        if (baseContent.length !== existing.length) row.message.content = baseContent
+        return
+    }
 
     const entries = [...logs.values()]
         .filter(log => log.messageId === messageId)
-        .sort((a, b) => a.deletedAt.localeCompare(b.deletedAt))
+        .sort((a, b) => a.deletedAtMs - b.deletedAtMs)
 
-    if (!entries.length) return
+    if (!entries.length) {
+        if (baseContent.length !== existing.length) row.message.content = baseContent
+        return
+    }
 
-    const labels = entries.map(log => ({
-        type: 'text',
-        content: '\\n' + ColorStart + DeletedColor + ColorSeparator +
-            'Reaction deleted at ' + log.deletedAt + ColorEnd,
-    }))
+    const labels: ContentNode[] = []
+    for (const log of entries) {
+        labels.push({
+            type: 'text',
+            content: '\n' + ColorStart + DeletedColor + ColorSeparator +
+                'Reaction deleted at ' + log.deletedAt + ColorEnd,
+            [GeneratedNode]: true,
+        })
+
+        if (!log.removedBy) continue
+
+        labels.push({
+            type: 'text',
+            content: ' by ',
+            [GeneratedNode]: true,
+        })
+
+        if (log.removedBy.avatarUrl) {
+            labels.push({
+                type: 'customEmoji',
+                id: 'reaction-log-avatar-' + log.removedBy.userId,
+                alt: log.removedBy.displayName + ' avatar',
+                src: log.removedBy.avatarUrl,
+                frozenSrc: log.removedBy.avatarUrl,
+                [GeneratedNode]: true,
+            })
+        }
+
+        // This is Discord's native user-mention node. Its userId makes the name
+        // tappable and opens the same profile sheet as an ordinary chat mention.
+        labels.push({
+            type: 'mention',
+            userId: log.removedBy.userId,
+            ...(log.guildId ? { guildId: log.guildId } : {}),
+            content: [{
+                type: 'text',
+                content: '@' + log.removedBy.displayName,
+            }],
+            [GeneratedNode]: true,
+        })
+    }
 
     row.message.content = [...baseContent, ...labels]
 }
