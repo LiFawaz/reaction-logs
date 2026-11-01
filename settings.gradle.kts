@@ -32,5 +32,5 @@ pluginRoots.forEach { root ->
     file(root).listFiles()
         ?.filter { it.isDirectory && File(it, "src/main").isDirectory }
         ?.sortedBy { it.name }
-        ?.forEach { dir -> include(":\${root}:\${dir.name}") }
+        ?.forEach { dir -> include(":${root}:${dir.name}") }
 }
