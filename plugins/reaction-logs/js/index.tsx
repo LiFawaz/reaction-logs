@@ -18,6 +18,8 @@ interface ReactionPayload {
     emoji?: Emoji
     reactionType?: number
     burst?: boolean
+    guildId?: string
+    guild_id?: string
     optimistic?: boolean
 }
 
@@ -30,6 +32,10 @@ interface CachedUser {
 
 interface UserStoreShape {
     getUser(id: string): CachedUser | undefined
+}
+
+interface ChannelStoreShape {
+    getChannel(id: string): { guild_id?: string | null; guildId?: string | null } | undefined
 }
 
 const REMOVAL_ECHO_WINDOW_MS = 10_000
@@ -47,6 +53,7 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
         const activeRemovals = new Map<string, Set<string>>()
         const recentRemovalEchoes = new Map<string, number>()
         const userStore = Stores.UserStore as unknown as UserStoreShape
+        const channelStore = Stores.ChannelStore as unknown as ChannelStoreShape
 
         let history = [...(jsonStorage.cache?.entries ?? [])]
         let nextId = jsonStorage.cache?.nextId ?? 1
@@ -85,6 +92,15 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
             const reactionType = payload.reactionType === 1 || payload.burst === true ? 1 : 0
             const emojiKey = emoji.id ? emoji.name + ':' + emoji.id : emoji.name
             return reactionKey(payload.messageId, emojiKey, reactionType)
+        }
+
+        const getGuildId = (channelId: string): string | null => {
+            try {
+                const channel = channelStore.getChannel(channelId)
+                return channel?.guild_id ?? channel?.guildId ?? null
+            } catch {
+                return null
+            }
         }
 
         const getUserName = (userId: string) => {
@@ -126,11 +142,13 @@ export default plugin<{ jsonStorage: HistoryStorage }>({
                 id: String(nextId++),
                 messageId: payload.messageId ?? '',
                 channelId: payload.channelId ?? '',
+                guildId: payload.guildId ?? payload.guild_id ?? (payload.channelId ? getGuildId(payload.channelId) : null),
                 emojiName: emoji?.name ?? 'Unknown emoji',
                 emojiId: emoji?.id ?? null,
                 reactionType: payload.reactionType === 1 || payload.burst === true ? 1 : 0,
                 userId,
                 userName: userId === '*' ? 'Unknown user' : getUserName(userId),
+                removedAt: now,
             }
 
             history = [...history, entry].slice(-MAX_HISTORY_ENTRIES)
