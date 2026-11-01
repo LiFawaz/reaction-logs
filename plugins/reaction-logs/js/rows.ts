@@ -14,7 +14,6 @@ export interface ReactionLog {
     emojiKey: string
     reactionType: number
     pillKey: string
-    deletedAt: string
     deletedAtMs: number
     removedBy?: ReactionRemover
 }
@@ -53,12 +52,6 @@ interface ContentNode {
 
 const MessageRowType = 1
 const UpdateChangeType = 2
-
-// These markers are removed and styled by ReactionLogHooks.kt.
-const ColorStart = ''
-const ColorSeparator = ''
-const ColorEnd = ''
-const DeletedColor = (0xFFED4245 | 0).toString()
 const GeneratedNode = 'reactionLogsGenerated'
 
 export function styleRow(
@@ -73,14 +66,8 @@ export function styleRow(
     if (changed.delete(messageId)) row.changeType = UpdateChangeType
 
     const existing = Array.isArray(row.message.content) ? row.message.content : []
-    // Strip our previous output before rebuilding it. This prevents duplicate names,
-    // avatars and timestamps when Discord regenerates the same row object.
-    const baseContent = existing.filter(node =>
-        node?.[GeneratedNode] !== true &&
-        !(node?.type === 'text' && typeof node.content === 'string' &&
-            node.content.includes(ColorStart) && node.content.includes('Reaction deleted at ') &&
-            node.content.includes(ColorEnd)),
-    )
+    // Remove our previous output before rebuilding it, preventing duplicate log rows.
+    const baseContent = existing.filter(node => node?.[GeneratedNode] !== true)
 
     if (!settings().enabled) {
         if (baseContent.length !== existing.length) row.message.content = baseContent
@@ -96,49 +83,86 @@ export function styleRow(
         return
     }
 
+    const config = settings()
     const labels: ContentNode[] = []
+
     for (const log of entries) {
-        labels.push({
-            type: 'text',
-            content: '\n' + ColorStart + DeletedColor + ColorSeparator +
-                'Reaction deleted at ' + log.deletedAt + ColorEnd,
-            [GeneratedNode]: true,
-        })
-
-        if (!log.removedBy) continue
-
-        labels.push({
-            type: 'text',
-            content: ' by ',
-            [GeneratedNode]: true,
-        })
-
         const mentionContent: ContentNode[] = []
-        if (log.removedBy.avatarUrl) {
-            mentionContent.push({
-                type: 'customEmoji',
-                id: 'reaction-log-avatar-' + log.removedBy.userId,
-                alt: log.removedBy.displayName + ' avatar',
-                src: log.removedBy.avatarUrl,
-                frozenSrc: log.removedBy.avatarUrl,
+        const remover = log.removedBy
+
+        if (remover) {
+            if (config.showAvatar && remover.avatarUrl) {
+                mentionContent.push({
+                    type: 'customEmoji',
+                    id: 'reaction-log-avatar-' + remover.userId,
+                    alt: remover.displayName + ' avatar',
+                    src: remover.avatarUrl,
+                    frozenSrc: remover.avatarUrl,
+                    [GeneratedNode]: true,
+                })
+            }
+
+            if (config.showUserName) {
+                mentionContent.push({
+                    type: 'text',
+                    content: '@' + remover.displayName,
+                    [GeneratedNode]: true,
+                })
+            }
+        }
+
+        const hasMention = !!remover && mentionContent.length > 0
+        if (!hasMention && !config.showTime) continue
+
+        labels.push({
+            type: 'text',
+            content: '\n',
+            [GeneratedNode]: true,
+        })
+
+        if (hasMention) {
+            labels.push({
+                type: 'text',
+                content: 'Removed by ',
+                [GeneratedNode]: true,
+            })
+            labels.push({
+                type: 'mention',
+                userId: remover!.userId,
+                ...(log.guildId ? { guildId: log.guildId } : {}),
+                content: mentionContent,
+                [GeneratedNode]: true,
+            })
+        } else {
+            labels.push({
+                type: 'text',
+                content: 'Reaction removed',
                 [GeneratedNode]: true,
             })
         }
-        mentionContent.push({
-            type: 'text',
-            content: '@' + log.removedBy.displayName,
-        })
 
-        // Discord's native mention node makes the name and avatar one tappable
-        // target and opens the same profile sheet as an ordinary chat mention.
-        labels.push({
-            type: 'mention',
-            userId: log.removedBy.userId,
-            ...(log.guildId ? { guildId: log.guildId } : {}),
-            content: mentionContent,
-            [GeneratedNode]: true,
-        })
+        if (config.showTime) {
+            labels.push({
+                type: 'text',
+                content: (hasMention ? ' · ' : ' at ') + formatLocalTime(log.deletedAtMs),
+                [GeneratedNode]: true,
+            })
+        }
     }
 
     row.message.content = [...baseContent, ...labels]
+}
+
+/** Uses the device's current locale and local timezone, matching Discord's local timestamps. */
+function formatLocalTime(timestamp: number) {
+    const date = new Date(timestamp)
+    try {
+        return date.toLocaleTimeString(undefined, {
+            hour: 'numeric',
+            minute: '2-digit',
+        })
+    } catch {
+        return String(date.getHours()).padStart(2, '0') + ':' +
+            String(date.getMinutes()).padStart(2, '0')
+    }
 }
