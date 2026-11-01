@@ -577,8 +577,8 @@ internal class ReactionLogHooks(
     }
 
     private companion object {
-        val ID_PATTERN = Regex("""(?:\\(|, )id=([^,)]*)""")
-        val NAME_PATTERN = Regex("""(?:\\(|, )name=([^,)]*)""")
+        val ID_PATTERN = Regex("""(?:[(]|, )id=([^,)]*)""")
+        val NAME_PATTERN = Regex("""(?:[(]|, )name=([^,)]*)""")
     }
 }
 
