@@ -37,7 +37,7 @@ jobs:
       - name: Build and package Reaction Logs
         run: gradle --no-daemon packageReactionLogs
         env:
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate package
         run: |
