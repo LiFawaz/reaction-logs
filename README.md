@@ -2,11 +2,11 @@
 
 A Valenced-only plugin for Discord Android.
 
-When a reaction is removed, the plugin marks the remaining reaction pill red. Long-press a red reaction to open Android's tooltip with the local removal time and the user whose reaction disappeared. Dismissing the tooltip does not clear it; long-press the same red reaction again to show it.
+When a reaction is removed, the plugin marks the reaction pill red and keeps a local one-count row visible even when Discord's server count reaches zero. Long-press a red reaction to show a small popup beside it with the local removal time and the user whose reaction disappeared. Dismissing the popup does not clear it; long-press the same red reaction again to show it.
 
 The timestamp defaults to a 12-hour clock (for example, `removed at 11:28 AM`). You can switch to a 24-hour clock (for example, `removed at 23:28`) in the plugin's settings. Both formats use your device's current local timezone automatically.
 
-Reaction add and remove events are allowed to update Discord's real local state. This keeps reaction counts and your own reaction toggle in sync, so you can add a reaction again after removing it. The removal marker clears when that same user adds the reaction again.
+Reaction add and remove events are allowed to update Discord's real local state. If Discord removes the final reaction row, the plugin recreates a local, non-selected row from the last real reaction model. This keeps the removed reaction visible in red while leaving the user's own reaction state unselected, so tapping it can add the reaction again. The removal marker clears when that same user adds the reaction again.
 
 The name shown is the user whose reaction was removed, based on Discord's reaction event. Discord does not include the identity of a moderator or other actor who may have triggered a removal, so the plugin cannot identify that actor.
 
