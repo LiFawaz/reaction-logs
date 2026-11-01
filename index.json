@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "name": "LiFawaz Reaction Logs",
+  "description": "Valenced plugin repository for locally logging removed reactions.",
+  "plugins": {
+    "lifawaz.reaction-logs": {
+      "name": "Reaction Logs",
+      "description": "Keep removed reaction pills red locally until the same emoji is added again.",
+      "author": "Li Fawaz",
+      "channels": {
+        "latest": "1.2.9"
+      },
+      "versions": {
+        "1.2.9": {
+          "url": "https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages/pool/lifawaz.reaction-logs@1.2.9.zip",
+          "sha256": "3185ddc04acfaace550ceb38811380dd269e9c1d7f1c7b4dc8234257947a7203",
+          "size": 28504,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": ">=352.2"
+            }
+          }
+        }
+      }
+    }
+  }
+}
