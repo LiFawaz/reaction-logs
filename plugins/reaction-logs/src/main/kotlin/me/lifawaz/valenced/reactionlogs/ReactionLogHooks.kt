@@ -161,8 +161,8 @@ internal class ReactionLogHooks(
         userId in removedUsersForMessage(messageId)
 
     /**
-     * Keep the original, simple reaction-pill behavior. We do not fabricate a
-     * zero-count reaction model; Discord owns whether the emoji pill still exists.
+     * Keep removed reaction pills visible by retaining and reattaching their real
+     * rendered views after Discord rebuilds the reaction row.
      */
     private fun hookReactionPills(dexFinder: DexFinder) {
         val accessoryClass = dexFinder.findClass {
