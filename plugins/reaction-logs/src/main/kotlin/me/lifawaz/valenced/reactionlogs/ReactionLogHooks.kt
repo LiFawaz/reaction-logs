@@ -31,6 +31,8 @@ private const val MANAGE_REACTIONS_MODEL_PROVIDER =
     "com.discord.widgets.chat.managereactions.ManageReactionsModelProvider"
 private const val MG_RECYCLER_VIEW_HOLDER =
     "com.discord.utilities.mg_recycler.MGRecyclerViewHolder"
+private const val REACTION_EMOJI_VIEW_HOLDER =
+    "com.discord.widgets.chat.managereactions.ManageReactionsEmojisAdapter\$ReactionEmojiViewHolder"
 private const val REACTION_EMOJI_CONTAINER_ID = "manage_reactions_emoji_container"
 private const val REACTION_EMOJI_VIEW_ID = "manage_reactions_emoji_emoji_textview"
 
@@ -51,8 +53,8 @@ internal class ReactionLogHooks(
     private val removedAtByKey = LinkedHashMap<String, Long>()
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
-    private val detailKeys = WeakHashMap<LinearLayout, String>()
-    private val detailLabels = WeakHashMap<LinearLayout, TextView>()
+    private val detailKeys = WeakHashMap<ViewGroup, String>()
+    private val detailLabels = WeakHashMap<ViewGroup, TextView>()
     @Volatile private var detailsMessageId: String? = null
     @Volatile private var use24HourClock = false
     private val bindingMessageId = ThreadLocal<String?>()
@@ -261,43 +263,73 @@ internal class ReactionLogHooks(
             detailsMessageId = runCatching {
                 messageIdGetter.invoke(param.thisObject)?.toString()
             }.getOrNull()
+            XposedBridge.log("Reaction Logs: opened reaction details for message ${detailsMessageId ?: "unknown"}")
         })
 
-        // Hook the shared RecyclerView holder base instead of a private inner holder.
-        // Discord's emoji-tab holder calls super.onConfigure(position, data), so this
-        // catches the reaction row even when its private holder implementation changes.
-        val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
-        val configure = holderBase.declaredMethods.firstOrNull {
-            it.name == "onConfigure" &&
-                it.parameterCount == 2 &&
-                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                it.parameterTypes[1] == Any::class.java
-        } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
-        configure.isAccessible = true
+        // Hook the actual emoji row after Discord finishes configuring it. The old
+        // shared-base hook ran from inside super.onConfigure(), before the row's
+        // own onConfigure2() had finished.
+        val rowHolder = runCatching {
+            dexFinder.classLoader.loadClass(REACTION_EMOJI_VIEW_HOLDER)
+        }.getOrNull()
+        var rowHooks = 0
+        if (rowHolder != null) {
+            val configureMethods = rowHolder.declaredMethods.filter {
+                it.name in setOf("onConfigure", "onConfigure2") &&
+                    it.parameterCount == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType
+            }
+            for (method in configureMethods) {
+                method.isAccessible = true
+                unhooks += method.hook(after = { param ->
+                    bindDetailsRow(param.thisObject, param.args.getOrNull(1))
+                })
+                rowHooks++
+            }
+        }
 
-        unhooks += configure.hook(after = { param ->
-            val data = param.args.getOrNull(1) ?: return@hook
-            val reaction = runCatching {
-                data.javaClass.methods.firstOrNull {
-                    it.name == "getReaction" && it.parameterCount == 0
-                }?.invoke(data)
-            }.getOrNull() ?: return@hook
-            val emoji = runCatching {
-                reaction.javaClass.methods.firstOrNull {
-                    it.name == "getEmoji" && it.parameterCount == 0
-                }?.invoke(reaction)
-            }.getOrNull() ?: return@hook
+        // Older/newer Discord builds may rename or move the private row holder.
+        // Keep the RecyclerView base hook as a compatibility fallback.
+        if (rowHooks == 0) {
+            val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
+            val configure = holderBase.declaredMethods.firstOrNull {
+                it.name == "onConfigure" &&
+                    it.parameterCount == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == Any::class.java
+            } ?: error("No compatible reaction row configure method found")
+            configure.isAccessible = true
+            unhooks += configure.hook(after = { param ->
+                bindDetailsRow(param.thisObject, param.args.getOrNull(1))
+            })
+        }
 
-            val itemView = holderItemView(param.thisObject) ?: return@hook
-            val container = reactionEmojiContainer(itemView) ?: return@hook
-            val messageId = detailsMessageId ?: return@hook
-            val key = emojiKey(emoji)?.let { "$messageId|$it" } ?: return@hook
+        XposedBridge.log(
+            "Reaction Logs: reaction-details row hook installed (${if (rowHooks > 0) "$rowHooks row method(s)" else "base fallback"})"
+        )
+    }
 
-            detailKeys[container] = key
-            applyDetailsTimestamp(container, key)
-        })
+    private fun bindDetailsRow(holder: Any, data: Any?) {
+        if (data == null) return
+        val reaction = runCatching {
+            data.javaClass.methods.firstOrNull {
+                it.name == "getReaction" && it.parameterCount == 0
+            }?.invoke(data)
+        }.getOrNull() ?: return
+        val emoji = runCatching {
+            reaction.javaClass.methods.firstOrNull {
+                it.name == "getEmoji" && it.parameterCount == 0
+            }?.invoke(reaction)
+        }.getOrNull() ?: return
 
-        XposedBridge.log("Reaction Logs: reaction-details row hook installed")
+        val itemView = holderItemView(holder) ?: return
+        val container = reactionEmojiContainer(itemView) ?: return
+        val emojiPart = emojiKey(emoji) ?: return
+        val messageId = detailsMessageId
+        val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
+
+        detailKeys[container] = key
+        applyDetailsTimestamp(container, key)
     }
 
     private fun holderItemView(holder: Any): View? {
@@ -315,12 +347,12 @@ internal class ReactionLogHooks(
                     field.get(holder) as? View
                 }.getOrNull()
             }
-            current = type.superclass
+            current = current.superclass
         }
         return null
     }
 
-    private fun reactionEmojiContainer(itemView: View): LinearLayout? {
+    private fun reactionEmojiContainer(itemView: View): ViewGroup? {
         val resources = itemView.resources
         val packageName = itemView.context.packageName
         val containerId = resources.getIdentifier(
@@ -341,15 +373,34 @@ internal class ReactionLogHooks(
             "id",
             "com.discord",
         )
-        if (containerId == 0 || emojiId == 0) return null
 
-        val container = itemView.findViewById<View>(containerId) as? LinearLayout ?: return null
-        val emojiView = itemView.findViewById<View>(emojiId) ?: return null
+        val emojiView = if (emojiId != 0) {
+            itemView.findViewById<View>(emojiId)
+        } else {
+            findEmojiView(itemView)
+        } ?: return null
+
+        val container = if (containerId != 0) {
+            itemView.findViewById<View>(containerId) as? ViewGroup
+        } else {
+            null
+        } ?: (emojiView.parent as? ViewGroup) ?: return null
+
         ensureDetailsLabel(container, emojiView)
         return container
     }
 
-    private fun ensureDetailsLabel(container: LinearLayout, emojiView: View): TextView {
+    private fun findEmojiView(root: View): View? {
+        if (root.javaClass.name.contains("SimpleDraweeSpanTextView")) return root
+        if (root !is ViewGroup) return null
+
+        for (index in 0 until root.childCount) {
+            findEmojiView(root.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
+    private fun ensureDetailsLabel(container: ViewGroup, emojiView: View): TextView {
         detailLabels[container]?.let { return it }
 
         val label = TextView(container.context).apply {
@@ -362,12 +413,21 @@ internal class ReactionLogHooks(
             visibility = View.GONE
         }
         val margin = (3f * container.resources.displayMetrics.density).toInt()
-        val layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
-        ).apply {
-            marginStart = margin
-            gravity = Gravity.CENTER_VERTICAL
+        val layoutParams: ViewGroup.LayoutParams = if (container is LinearLayout) {
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ).apply {
+                marginStart = margin
+                gravity = Gravity.CENTER_VERTICAL
+            }
+        } else {
+            ViewGroup.MarginLayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ).apply {
+                marginStart = margin
+            }
         }
         val insertIndex = (container.indexOfChild(emojiView) + 1).coerceIn(0, container.childCount)
         container.addView(label, insertIndex, layoutParams)
@@ -375,12 +435,30 @@ internal class ReactionLogHooks(
         return label
     }
 
-    private fun applyDetailsTimestamp(container: LinearLayout, key: String) {
-        val prefix = "$key|"
+    private fun applyDetailsTimestamp(container: ViewGroup, key: String) {
+        val exactPrefix = if (key.contains("|")) "$key|" else null
         val timestamp = synchronized(removedAtByKey) {
-            removedAtByKey.entries.asSequence()
-                .filter { it.key.startsWith(prefix) && it.value > 0L }
-                .maxOfOrNull { it.value }
+            val exact = exactPrefix?.let { prefix ->
+                removedAtByKey.entries.asSequence()
+                    .filter { it.key.startsWith(prefix) && it.value > 0L }
+                    .maxOfOrNull { it.value }
+            }
+            if (exact != null) {
+                exact
+            } else {
+                // If Discord no longer exposes the provider's message ID, only use
+                // a cross-message match when that emoji appears in one message.
+                val emojiPart = key.substringAfter('|', key)
+                val matches = removedAtByKey.entries.filter { entry ->
+                    val parts = entry.key.split('|')
+                    parts.size == 3 && parts[1] == emojiPart && entry.value > 0L
+                }
+                if (matches.map { it.key.substringBefore('|') }.distinct().size == 1) {
+                    matches.maxOfOrNull { it.value }
+                } else {
+                    null
+                }
+            }
         }
         val label = detailLabels[container] ?: return
         if (timestamp == null) {

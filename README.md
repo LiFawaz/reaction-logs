@@ -4,7 +4,7 @@ A Valenced-only plugin for Discord Android.
 
 When a reaction is removed, the plugin keeps that reaction visible in your local session and highlights its reaction pill in red. Hold the reaction to open its details: the plugin shows the removal time in small text on the same line, directly beside that emoji in the popup's emoji list.
 
-The timestamp defaults to a 12-hour clock (for example, `11:28 AM`). You can switch to a 24-hour clock (for example, `23:28`) in the plugin's settings. Both formats use your device's current local timezone automatically.
+The timestamp defaults to a 12-hour clock (for example, `removed at 11:28 AM`). You can switch to a 24-hour clock (for example, `removed at 23:28`) in the plugin's settings. Both formats use your device's current local timezone automatically.
 
 Each reaction is matched by message ID, emoji ID/name, and reaction type, so removed reactions and their timestamps stay attached to the correct message and emoji. When the same reaction is added again, its matching removal marker and timestamp are cleared.
 

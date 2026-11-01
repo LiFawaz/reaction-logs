@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Keep removed reactions visible locally and show a small removal time beside the emoji in reaction details.",
-  "version": "1.1.1",
+  "description": "Keep removed reactions visible locally and show their removal time beside the emoji in reaction details.",
+  "version": "1.1.2",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
