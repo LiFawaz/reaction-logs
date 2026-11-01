@@ -49,6 +49,10 @@ internal class ReactionLogHooks(
     private val removedAtByKey = LinkedHashMap<String, RemovedEntry>()
     /** Last real reaction model observed before Discord drops a zero-count row. */
     private val knownReactionModels = LinkedHashMap<String, Any>()
+    private val lastReactionArgs = WeakHashMap<ViewGroup, Array<Any?>>()
+    private val lastReactionMessageIds = WeakHashMap<ViewGroup, String>()
+    private var setReactionsMethod: Method? = null
+    private val internalRebind = ThreadLocal<Boolean>()
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
     private val originalLongClickListeners = WeakHashMap<View, View.OnLongClickListener?>()
@@ -105,6 +109,9 @@ internal class ReactionLogHooks(
             for ((pill, key) in bound.entries.toList()) {
                 applyStyle(pill, isRemoved(key))
             }
+            // Flux events can arrive after Discord has already rebound the row.
+            // Re-run the last real reaction list now that the removal record exists.
+            rebindMessages(parsed.keys)
         }
     }
 
@@ -133,6 +140,8 @@ internal class ReactionLogHooks(
         synchronized(removedAtByKey) { removedAtByKey.clear() }
         synchronized(knownReactionModels) { knownReactionModels.clear() }
         mainHandler.post {
+            lastReactionArgs.clear()
+            lastReactionMessageIds.clear()
             for (popup in removalPopups.values.toList()) {
                 runCatching { popup.dismiss() }
             }
@@ -231,6 +240,7 @@ internal class ReactionLogHooks(
                 usingEqStrings("reactions", "addNewReactionAccessibilityLabel")
             }
         } ?: error("ShortcutsFlexbox.setReactions not found")
+        setReactionsMethod = setReactions
 
         unhooks += onBindViewHolder.hook(
             before = { param ->
@@ -249,6 +259,11 @@ internal class ReactionLogHooks(
             before = { param ->
                 val originalReactions = param.args.getOrNull(0) as? List<*> ?: return@hook
                 val messageId = bindingMessageId.get() ?: return@hook
+                val flexbox = param.thisObject as? ViewGroup
+                if (flexbox != null && internalRebind.get() != true) {
+                    lastReactionArgs[flexbox] = param.args.clone()
+                    lastReactionMessageIds[flexbox] = messageId
+                }
                 val currentKeys = LinkedHashSet<String>()
 
                 // Cache each full concrete model while it is still in Discord's
@@ -338,6 +353,35 @@ internal class ReactionLogHooks(
                 }
             },
         )
+    }
+
+    /**
+     * Re-apply the last real reaction list after a Flux removal is recorded.
+     * This closes the race where Discord renders its zero-count update before
+     * setRemoved reaches the native hook. The setReactions hook then appends the
+     * synthetic red row using the cached concrete model.
+     */
+    private fun rebindMessages(changedKeys: Set<String>) {
+        if (changedKeys.isEmpty()) return
+        val method = setReactionsMethod ?: return
+        val affectedIds = changedKeys.map { it.substringBefore('|') }.toSet()
+
+        for ((flexbox, messageId) in lastReactionMessageIds.entries.toList()) {
+            if (messageId !in affectedIds || !flexbox.isAttachedToWindow) continue
+            val args = lastReactionArgs[flexbox]?.clone() ?: continue
+
+            runCatching {
+                internalRebind.set(true)
+                bindingMessageId.set(messageId)
+                method.invoke(flexbox, *args)
+            }.onFailure {
+                XposedBridge.log("Reaction Logs: failed to refresh retained reaction row: $it")
+            }
+            finally {
+                bindingMessageId.remove()
+                internalRebind.remove()
+            }
+        }
     }
 
     /**
