@@ -7,6 +7,8 @@ export interface RemovalLogEntry {
     reactionType: number
     userId: string
     userName: string
+    guildId?: string | null
+    removedAt?: number
 }
 
 export interface HistoryStorage {
