@@ -22,7 +22,12 @@ export default plugin({
 
         const syncNative = () => {
             try {
-                const entries = [...pendingRemovals.keys()].map(pillKey => ({ pillKey }))
+                const entries = [...pendingRemovals].map(([pillKey, users]) => ({
+                    pillKey,
+                    removedUsers: [...users]
+                        .filter(userId => userId !== '*')
+                        .map(id => ({ id })),
+                }))
                 setRemoved(JSON.stringify(entries))
             } catch (error) {
                 plugin.reportError('Failed to refresh reaction logs: ' + String(error))
