@@ -42,7 +42,7 @@ internal class ReactionLogHooks(
     private val bridge: ValencedBridge,
 ) {
     private data class Pill(val emoji: Any?, val burst: Boolean, val count: Int)
-    private data class DetailsPlacement(val host: ViewGroup, val anchor: View)
+    private data class DetailsPlacement(val host: ViewGroup, val anchor: View, val emojiView: View)
 
     private data class OriginalStyle(
         val backgroundTint: ColorStateList?,
@@ -435,7 +435,7 @@ internal class ReactionLogHooks(
         val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
 
         val host = placement.host
-        ensureDetailsLabel(host, placement.anchor, emojiView)
+        ensureDetailsLabel(host, placement.anchor, placement.emojiView)
         detailKeys[host] = key
         detailLogOnce(
             "row-bound",
@@ -526,7 +526,7 @@ internal class ReactionLogHooks(
 
         while (parent != null) {
             if (parent is LinearLayout) {
-                val candidate = DetailsPlacement(parent, childOnPath)
+                val candidate = DetailsPlacement(parent, childOnPath, emojiView)
                 if (nearestLinear == null) nearestLinear = candidate
                 if (
                     parent.orientation == LinearLayout.HORIZONTAL &&
@@ -539,7 +539,7 @@ internal class ReactionLogHooks(
             parent = parent.parent as? ViewGroup
         }
 
-        return nearestLinear ?: DetailsPlacement(emojiContainer, emojiView)
+        return nearestLinear ?: DetailsPlacement(emojiContainer, emojiView, emojiView)
     }
 
     private fun findEmojiView(root: View): View? {
