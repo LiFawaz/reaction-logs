@@ -283,6 +283,7 @@ internal class ReactionLogHooks(dexFinder: DexFinder) {
     private companion object {
         val ID_PATTERN = Regex(""", id=([^,)]*)""")
         val NAME_PATTERN = Regex("""\(name=(.*?), src=""")
+        val FALLBACK_NAME_PATTERN = Regex("""\(name=([^,)]*)""")
     }
 }
 
