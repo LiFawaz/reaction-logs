@@ -228,9 +228,25 @@ internal class ReactionLogHooks(dexFinder: DexFinder) {
     }
 
     private fun emojiKey(emoji: Any): String? {
+        // Prefer the actual model getters; toString() formats can change between Discord builds.
+        val methods = emoji.javaClass.methods
+        val id = runCatching {
+            methods.firstOrNull { it.name == "getId" && it.parameterCount == 0 }
+                ?.invoke(emoji)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+        }.getOrNull()
+        if (id != null) return id
+
+        val name = runCatching {
+            methods.firstOrNull { it.name == "getName" && it.parameterCount == 0 }
+                ?.invoke(emoji)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+        }.getOrNull()
+        if (name != null) return name
+
+        // Fallback for model builds that expose no public getters.
         val text = emoji.toString()
-        val id = ID_PATTERN.find(text)?.groupValues?.get(1)?.takeIf { it != "null" }
-        return id ?: NAME_PATTERN.find(text)?.groupValues?.get(1)
+        val parsedId = ID_PATTERN.find(text)?.groupValues?.get(1)?.takeIf { it != "null" }
+        return parsedId ?: NAME_PATTERN.find(text)?.groupValues?.get(1)
+            ?: FALLBACK_NAME_PATTERN.find(text)?.groupValues?.get(1)
     }
 
     private fun SpannableStringBuilder.styleDeletedLabels() {
@@ -252,7 +268,7 @@ internal class ReactionLogHooks(dexFinder: DexFinder) {
             delete(end, end + 1)
             delete(start, separator + 1)
 
-            val labelEnd = start + end - separator - 1
+            val labelEnd = start + end - separator - 2
             if (color != null) {
                 setSpan(
                     ForegroundColorSpan(color),
