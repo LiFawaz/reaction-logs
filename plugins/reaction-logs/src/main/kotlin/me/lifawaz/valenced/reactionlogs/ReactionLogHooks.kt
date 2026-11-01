@@ -370,14 +370,13 @@ internal class ReactionLogHooks(
             if (messageId !in affectedIds || !flexbox.isAttachedToWindow) continue
             val args = lastReactionArgs[flexbox]?.clone() ?: continue
 
-            runCatching {
+            try {
                 internalRebind.set(true)
                 bindingMessageId.set(messageId)
                 method.invoke(flexbox, *args)
-            }.onFailure {
-                XposedBridge.log("Reaction Logs: failed to refresh retained reaction row: $it")
-            }
-            finally {
+            } catch (error: Throwable) {
+                XposedBridge.log("Reaction Logs: failed to refresh retained reaction row: $error")
+            } finally {
                 bindingMessageId.remove()
                 internalRebind.remove()
             }
