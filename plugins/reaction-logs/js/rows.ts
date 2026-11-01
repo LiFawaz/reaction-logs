@@ -56,10 +56,22 @@ export function styleRow(
     changed: Set<string>,
     settings: () => Settings,
 ) {
-    if (!settings().enabled || row?.type !== MessageRowType || !row.message?.id) return
+    if (row?.type !== MessageRowType || !row.message?.id) return
 
     const messageId = row.message.id
     if (changed.delete(messageId)) row.changeType = UpdateChangeType
+
+    const existing = Array.isArray(row.message.content) ? row.message.content : []
+    // RowManager can regenerate a row from an object that already contains our labels.
+    // Strip old labels first so repeated renders never stack duplicate timestamps.
+    const baseContent = existing.filter(node =>
+        !(node?.type === 'text' && typeof node.content === 'string' &&
+            node.content.includes(ColorStart) && node.content.includes('Reaction deleted at ') &&
+            node.content.includes(ColorEnd)),
+    )
+    if (baseContent.length !== existing.length) row.message.content = baseContent
+
+    if (!settings().enabled) return
 
     const entries = [...logs.values()]
         .filter(log => log.messageId === messageId)
@@ -69,10 +81,9 @@ export function styleRow(
 
     const labels = entries.map(log => ({
         type: 'text',
-        content: '\n' + ColorStart + DeletedColor + ColorSeparator +
+        content: '\\n' + ColorStart + DeletedColor + ColorSeparator +
             'Reaction deleted at ' + log.deletedAt + ColorEnd,
     }))
 
-    const existing = Array.isArray(row.message.content) ? row.message.content : []
-    row.message.content = [...existing, ...labels]
+    row.message.content = [...baseContent, ...labels]
 }
