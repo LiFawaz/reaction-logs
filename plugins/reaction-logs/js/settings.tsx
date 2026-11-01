@@ -16,11 +16,6 @@ const emojiLabel = (entry: RemovalLogEntry) =>
         ? entry.emojiName + ' (custom emoji)'
         : entry.emojiName
 
-const formatTimestamp = (timestamp?: number) => {
-    if (!timestamp || !Number.isFinite(timestamp)) return 'Time unavailable'
-    return new Date(timestamp).toLocaleString()
-}
-
 const messageUrl = (entry: RemovalLogEntry) => {
     if (!entry.channelId || !entry.messageId) return null
     return (
@@ -38,19 +33,23 @@ const openLink = (url: string) => {
 export default function SettingsComponent({
     api: { jsonStorage: storage },
 }: SettingsProps) {
-    const data = storage.use() ?? { entries: [], nextId: 1 }
+    const data = storage.use() ?? { entries: [], nextId: 1, activeRemovals: [] }
     const entries = data.entries ?? []
     const latestEntries = [...entries].reverse().slice(0, 100)
 
     const clearHistory = () => {
-        void storage.set({ entries: [], nextId: 1 }, true)
+        void storage.set({
+            entries: [],
+            nextId: 1,
+            activeRemovals: data.activeRemovals ?? [],
+        }, true)
     }
 
     return (
         <Page>
             <TableRowGroup
                 title={'Removal history (' + entries.length + ')'}
-                description="Each entry keeps the removed reaction, the account that removed it, the time, and a link back to the message. Adding the reaction again only clears its red pill; it does not erase this history."
+                description="Local history of removed reactions. Each entry keeps the emoji, affected account, and message link. Red reaction pills stay until that same emoji is added again."
             >
                 {latestEntries.length === 0 ? (
                     <TableRow
@@ -67,10 +66,7 @@ export default function SettingsComponent({
                             <TableRowGroup
                                 key={entry.id}
                                 title={entry.userName + ' · ' + emoji}
-                                description={
-                                    (entry.reactionType === 1 ? 'Super reaction removed · ' : 'Reaction removed · ') +
-                                    formatTimestamp(entry.removedAt)
-                                }
+                                description={entry.reactionType === 1 ? 'Super reaction removed' : 'Reaction removed'}
                             >
                                 <TableRow
                                     label="View profile"
