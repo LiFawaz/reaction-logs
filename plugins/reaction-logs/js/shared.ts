@@ -8,15 +8,21 @@ export interface RemovalLogEntry {
     userId: string
     userName: string
     guildId?: string | null
-    removedAt?: number
+}
+
+export interface ActiveRemovalEntry {
+    pillKey: string
+    removedUsers: string[]
 }
 
 export interface HistoryStorage {
     entries: RemovalLogEntry[]
     nextId: number
+    activeRemovals: ActiveRemovalEntry[]
 }
 
 export const DefaultStorage: HistoryStorage = {
     entries: [],
     nextId: 1,
+    activeRemovals: [],
 }
