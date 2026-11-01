@@ -45,10 +45,6 @@ internal class ReactionLogHooks(
         hookReactionPills(dexFinder)
     }
 
-    /**
-     * Receives removed reaction keys. A timestamp or remover name is deliberately
-     * not required: the reaction log is represented only by a red-highlighted pill.
-     */
     fun setRemoved(json: String) {
         val parsed = LinkedHashSet<String>()
         val array = JSONArray(json)
@@ -242,18 +238,23 @@ internal class ReactionLogHooks(
             methods.firstOrNull { it.name == "getId" && it.parameterCount == 0 }
                 ?.invoke(emoji)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
         }.getOrNull()
-        if (id != null) return id
-
         val name = runCatching {
             methods.firstOrNull { it.name == "getName" && it.parameterCount == 0 }
                 ?.invoke(emoji)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
         }.getOrNull()
-        if (name != null) return name
+
+        if (name != null) return if (id != null) "$name:$id" else name
+        if (id != null) return id
 
         val text = emoji.toString()
         val parsedId = ID_PATTERN.find(text)?.groupValues?.get(1)?.takeIf { it != "null" }
-        return parsedId ?: NAME_PATTERN.find(text)?.groupValues?.get(1)
+        val parsedName = NAME_PATTERN.find(text)?.groupValues?.get(1)
             ?: FALLBACK_NAME_PATTERN.find(text)?.groupValues?.get(1)
+        return when {
+            parsedName != null && parsedId != null -> "$parsedName:$parsedId"
+            parsedName != null -> parsedName
+            else -> parsedId
+        }
     }
 
     private companion object {
@@ -264,7 +265,7 @@ internal class ReactionLogHooks(
 }
 
 private fun reactionKey(messageId: String, emojiKey: String, type: Int) =
-    "$messageId:$emojiKey:$type"
+    "$messageId|$emojiKey|$type"
 
 private inline fun Method.hook(
     crossinline before: (XC_MethodHook.MethodHookParam) -> Unit = {},
