@@ -50,6 +50,7 @@ internal class ReactionLogHooks(
     private val bound = WeakHashMap<LinearLayout, String>()
     private val originalStyles = WeakHashMap<LinearLayout, OriginalStyle>()
     private val originalLongClickListeners = WeakHashMap<View, View.OnLongClickListener?>()
+    private val wrappedLongClickListeners = WeakHashMap<View, Boolean>()
     private val removalPopups = WeakHashMap<View, PopupWindow>()
     private val internalListenerUpdate = ThreadLocal<Boolean>()
     @Volatile private var use24HourClock = false
@@ -136,6 +137,7 @@ internal class ReactionLogHooks(
             bound.clear()
             originalStyles.clear()
             originalLongClickListeners.clear()
+            wrappedLongClickListeners.clear()
         }
     }
 
@@ -291,6 +293,7 @@ internal class ReactionLogHooks(
     private fun installRemovalLongClick(view: View, key: String?) {
         if (key.isNullOrBlank()) return
         val original = originalLongClickListeners[view]
+        wrappedLongClickListeners[view] = true
         setManagedLongClickListener(view, View.OnLongClickListener { target ->
             // Keep Discord's reaction-details action intact, then show the removal note.
             runCatching { original?.onLongClick(target) }
@@ -300,7 +303,7 @@ internal class ReactionLogHooks(
     }
 
     private fun restoreOriginalLongClick(view: View) {
-        val wasWrapped = originalLongClickListeners.containsKey(view)
+        val wasWrapped = wrappedLongClickListeners.remove(view) != null
         if (!wasWrapped) return
         setManagedLongClickListener(view, originalLongClickListeners[view])
     }
