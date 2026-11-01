@@ -76,7 +76,7 @@ jobs:
                   }
               }
           }
-          (publish / "index.json").write_text(json.dumps(index, indent=2) + "\\n", encoding="utf-8")
+          (publish / "index.json").write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
           PY
 
       - name: Publish isolated test feed
