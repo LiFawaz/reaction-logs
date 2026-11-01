@@ -1,0 +1,67 @@
+name: Build Reaction Logs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Build and package Reaction Logs
+        run: gradle --no-daemon packageReactionLogs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate package
+        run: |
+          python3 - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+
+          manifest = json.loads(Path("plugins/reaction-logs/manifest.json").read_text())
+          archive = Path(f"build/dist/{manifest['id']}@{manifest['version']}.zip")
+          assert archive.is_file(), f"Missing package: {archive}"
+          with zipfile.ZipFile(archive) as zip_file:
+              bad = zip_file.testzip()
+              assert bad is None, f"Corrupt ZIP member: {bad}"
+              names = set(zip_file.namelist())
+              assert "manifest.json" in names
+              assert "index.js" in names
+              assert "plugin.jar" in names
+          print(f"Validated {archive}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reaction-logs-plugin
+          path: build/dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
