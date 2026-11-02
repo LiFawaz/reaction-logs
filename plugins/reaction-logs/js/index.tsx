@@ -218,7 +218,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     const key = makeKey(payload)
                     if (!key) return payload
 
-                    const userId = getEventUserId(payload) ?? '*'
+                    const userId = getEventUserId(payload) ?? getCurrentUserId() ?? '*'
                     const token = key + '\u0000' + userId
 
                     // Record an optimistic remove once. Its gateway echo is still
