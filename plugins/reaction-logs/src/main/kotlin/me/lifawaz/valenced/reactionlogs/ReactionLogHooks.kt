@@ -293,31 +293,51 @@ internal class ReactionLogHooks(
             }
         } ?: error("ShortcutsFlexbox.setReactions not found")
 
+        // The message ID is scoped to the adapter bind only. The Flexbox cache below
+        // is also keyed by the actual ViewGroup, so image messages and recycled rows
+        // cannot accidentally reuse another message's retained pill.
         unhooks += onBindViewHolder.hook(
+            before = { param ->
+                val index = param.args.getOrNull(1) as? Int
+                val item = index?.let {
+                    (adapterItems.get(param.thisObject) as List<*>?)?.getOrNull(it)
+                }
+                if (item != null && accessoryClass.isInstance(item)) {
+                    bindingMessageId.set(accessoryMessageId.invoke(item) as String?)
+                } else {
+                    bindingMessageId.remove()
+                }
+            },
+            after = { bindingMessageId.remove() },
+        )
+
+        unhooks += setReactions.hook(
             before = { param ->
                 val flexbox = param.thisObject as? ViewGroup ?: return@hook
                 val messageId = bindingMessageId.get()
                 val prefix = messageId?.let { "$it|" }
 
-                val cached = synchronized(retainedPillViews) {
-                    retainedPillViews.getOrPut(flexbox) { LinkedHashMap() }
-                }
-                if (prefix != null) {
-                    for ((oldKey, oldView) in cached.toMap()) {
-                        if (!oldKey.startsWith(prefix)) {
-                            cached.remove(oldKey)
-                            boundPills.remove(oldView)
-                            applyPillStyle(oldView, false)
+                synchronized(retainedPillViews) {
+                    val cached = retainedPillViews.getOrPut(flexbox) { LinkedHashMap() }
+
+                    // A ViewHolder may be recycled for another message. Discard only
+                    // the old cache entries for that Flexbox before collecting new ones.
+                    if (prefix != null) {
+                        for ((oldKey, oldView) in cached.toMap()) {
+                            if (!oldKey.startsWith(prefix)) {
+                                cached.remove(oldKey)
+                                boundPills.remove(oldView)
+                                applyPillStyle(oldView, false)
+                            }
                         }
                     }
-                }
 
-                // Capture the real red pill before Discord rebuilds the row.
-                for (index in 0 until flexbox.childCount) {
-                    val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
-                    val key = boundPills[pillView] ?: continue
-                    if (isRemoved(key) && (prefix == null || key.startsWith(prefix))) {
-                        cached[key] = pillView
+                    for (index in 0 until flexbox.childCount) {
+                        val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
+                        val key = boundPills[pillView] ?: continue
+                        if (isRemoved(key) && (prefix == null || key.startsWith(prefix))) {
+                            cached[key] = pillView
+                        }
                     }
                 }
             },
@@ -377,7 +397,7 @@ internal class ReactionLogHooks(
                 }
 
                 for ((key, pillView) in retained) {
-                    if (key in currentKeys) continue
+                    if (key in currentKeys || !isRemoved(key)) continue
                     if (pillView.parent !== flexbox) {
                         (pillView.parent as? ViewGroup)?.removeView(pillView)
                         runCatching { flexbox.addView(pillView) }.onFailure {
@@ -389,7 +409,6 @@ internal class ReactionLogHooks(
                     applyPillStyle(pillView, true)
                 }
             },
-
         )
     }
 
