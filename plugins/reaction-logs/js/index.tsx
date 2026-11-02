@@ -41,6 +41,18 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
         let persistQueue = Promise.resolve()
         const pendingRemovalEchoes = new Set<string>()
+        const pendingAddEchoes = new Set<string>()
+
+        const getCurrentUserId = (): string | undefined => {
+            try {
+                const userStore = Stores.UserStore as unknown as {
+                    getCurrentUser?: () => { id?: string } | undefined
+                }
+                return userStore.getCurrentUser?.()?.id
+            } catch {
+                return undefined
+            }
+        }
 
         const persistState = () => {
             const snapshot: ReactionStorage = {
@@ -85,9 +97,12 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             const userId = payload.userId || '*'
             const token = key + '\u0000' + userId
 
-            // Ignore Discord's duplicate optimistic/gateway event pair without a timer.
+            // Ignore a duplicate gateway echo of the same removal.
             if (userId !== '*' && pendingRemovalEchoes.delete(token)) return false
             if (userId !== '*') pendingRemovalEchoes.add(token)
+
+            // A new removal supersedes a pending add echo for the same account.
+            if (userId !== '*') pendingAddEchoes.delete(token)
 
             const users = activeRemovals.get(key) ?? new Set<string>()
             users.add(userId)
@@ -99,11 +114,17 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             return true
         }
 
-        // Any new use of this exact emoji resets its red marker completely.
-        const clearActiveForKey = (key: string) => {
-            const removed = activeRemovals.delete(key)
-            removedAtByKey.delete(key)
-            return removed
+        // Clear only the account that added this emoji again. Other removed
+        // reactors on the same emoji must remain highlighted.
+        const clearActiveForUser = (key: string, userId: string) => {
+            const users = activeRemovals.get(key)
+            if (!users || !users.delete(userId)) return false
+
+            if (users.size === 0) {
+                activeRemovals.delete(key)
+                removedAtByKey.delete(key)
+            }
+            return true
         }
 
         const clearActiveMessage = (messageId?: string) => {
@@ -118,6 +139,12 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     changed = true
                 }
             }
+            for (const token of pendingRemovalEchoes) {
+                if (token.startsWith(prefix)) pendingRemovalEchoes.delete(token)
+            }
+            for (const token of pendingAddEchoes) {
+                if (token.startsWith(prefix)) pendingAddEchoes.delete(token)
+            }
             return changed
         }
 
@@ -126,8 +153,20 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 'MESSAGE_REACTION_REMOVE',
                 payload => {
                     const key = makeKey(payload)
-                    if (key) recordRemoval(payload, key)
-                    // Keep Discord from removing the local pill; only recolor it red.
+                    if (!key) return payload
+
+                    const recorded = recordRemoval(payload, key)
+                    if (!recorded) return undefined
+
+                    // Let Discord update our own "me" state. Otherwise tapping a
+                    // red pill keeps acting like a removal and cannot add it back.
+                    const currentUserId = getCurrentUserId()
+                    if (payload.userId && currentUserId && payload.userId === currentUserId) {
+                        return payload
+                    }
+
+                    // For other users, keep the local reactor row so it can be
+                    // visibly marked red in Manage Reactions.
                     return undefined
                 },
             ),
@@ -138,15 +177,27 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     const key = makeKey(payload)
                     if (!key) return payload
 
-                    const userId = payload.userId || '*'
-                    pendingRemovalEchoes.delete(key + '\u0000' + userId)
+                    const userId = payload.userId || getCurrentUserId() || '*'
+                    const token = key + '\u0000' + userId
 
-                    if (clearActiveForKey(key)) {
+                    if (userId !== '*') {
+                        pendingRemovalEchoes.delete(token)
+
+                        // Apply an optimistic add once and ignore only its later
+                        // gateway echo, not the real local add action.
+                        if (!payload.optimistic && pendingAddEchoes.delete(token)) {
+                            return undefined
+                        }
+                        if (payload.optimistic) pendingAddEchoes.add(token)
+                    }
+
+                    if (clearActiveForUser(key, userId)) {
                         persistState()
                         syncNative()
-                        // The retained local pill already represents this reaction.
-                        return undefined
                     }
+
+                    // Always pass the add through so Discord updates the count and
+                    // the current account's "me" state. The red marker is per-user.
                     return payload
                 },
             ),
@@ -218,6 +269,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 activeRemovals.clear()
                 removedAtByKey.clear()
                 pendingRemovalEchoes.clear()
+                pendingAddEchoes.clear()
                 try {
                     clearRemoved()
                 } catch (error) {
