@@ -12,8 +12,13 @@ val reactionLogs = plugin {
     start {
         hooks = ReactionLogHooks(dexFinder, bridge)
 
-        registerNativeMethod("lifawaz.reaction-logs.setRemoved") { args ->
-            hooks?.setRemoved(args[0] as String)
+        registerNativeMethod("lifawaz.reaction-logs.setRemovalLogs") { args ->
+            hooks?.setRemovalLogs(args[0] as String)
+            null
+        }
+
+        registerNativeMethod("lifawaz.reaction-logs.setRetainedPills") { args ->
+            hooks?.setRetainedPills(args[0] as String)
             null
         }
 
