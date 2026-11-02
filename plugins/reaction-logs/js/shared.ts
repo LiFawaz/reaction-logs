@@ -1,6 +1,7 @@
 export interface ActiveRemovalEntry {
     pillKey: string
     removedUsers: string[]
+    removedAt?: number
 }
 
 export interface ReactionStorage {
