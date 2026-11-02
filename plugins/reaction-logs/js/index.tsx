@@ -1,11 +1,15 @@
 import { Stores, onFluxEventDispatched } from '@valenced/discord/flux'
-import { setRemoved, clearRemoved } from './native'
+import { setRemovalLogs, setRetainedPills, clearNativeState } from './native'
 import { DefaultStorage } from './shared'
-import type { ReactionStorage } from './shared'
+import type { ReactionStorage, RemovalLogEntry } from './shared'
 
 interface Emoji {
     id?: string | null
     name: string
+}
+
+interface EventUser {
+    id?: string | number | null
 }
 
 interface ReactionPayload {
@@ -14,12 +18,34 @@ interface ReactionPayload {
     id?: string
     ids?: string[]
     userId?: string
+    user_id?: string
+    user?: EventUser | null
+    member?: { id?: string | number | null; user?: EventUser | null } | null
     emoji?: Emoji
     reactionType?: number
     burst?: boolean
-    guildId?: string
-    guild_id?: string
     optimistic?: boolean
+}
+
+type UserTimes = Map<string, number>
+
+const keyFor = (messageId: string, emojiKey: string, reactionType: number) =>
+    messageId + '|' + emojiKey + '|' + reactionType
+
+const getEmojiPart = (emoji: Emoji | undefined): string | null => {
+    if (!emoji?.name) return null
+    return emoji.id ? emoji.name + ':' + emoji.id : emoji.name
+}
+
+const getEventUserId = (payload: ReactionPayload): string | undefined => {
+    const value =
+        payload.userId ??
+        payload.user_id ??
+        payload.user?.id ??
+        payload.member?.user?.id ??
+        payload.member?.id
+    if (value === undefined || value === null || String(value).trim() === '') return undefined
+    return String(value)
 }
 
 export default plugin<{ jsonStorage: ReactionStorage }>({
@@ -29,14 +55,41 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
     },
 
     start({ cleanup, plugin, jsonStorage }) {
-        // Only the active local red-marker state is retained.
-        const activeRemovals = new Map<string, Set<string>>()
-        const removedAtByKey = new Map<string, number>()
-        for (const item of jsonStorage.cache?.activeRemovals ?? []) {
-            if (!item?.pillKey) continue
-            activeRemovals.set(item.pillKey, new Set(item.removedUsers ?? []))
-            const removedAt = Number(item.removedAt)
-            removedAtByKey.set(item.pillKey, Number.isFinite(removedAt) && removedAt > 0 ? removedAt : Date.now())
+        // Removal logging and red-pill retention are deliberately independent.
+        const removalLogs = new Map<string, UserTimes>()
+        const retainedPillKeys = new Set<string>()
+
+        const cache = jsonStorage.cache ?? DefaultStorage
+
+        // Load the separated format first.
+        for (const entry of cache.removalLogs ?? []) {
+            if (!entry?.pillKey) continue
+            const users = new Map<string, number>()
+            for (const user of entry.removedUsers ?? []) {
+                if (!user?.id) continue
+                const timestamp = Number(user.removedAt ?? entry.removedAt ?? Date.now())
+                users.set(String(user.id), Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now())
+            }
+            if (users.size > 0) removalLogs.set(entry.pillKey, users)
+        }
+
+        for (const key of cache.retainedPillKeys ?? []) {
+            if (typeof key === 'string' && key.length > 0) retainedPillKeys.add(key)
+        }
+
+        // Migrate older 1.3.0/1.3.1 local data without merging the two states again.
+        for (const legacy of cache.activeRemovals ?? []) {
+            if (!legacy?.pillKey) continue
+            const timestamp = Number(legacy.removedAt ?? Date.now())
+            const safeTime = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now()
+            if (!retainedPillKeys.has(legacy.pillKey)) retainedPillKeys.add(legacy.pillKey)
+            if (!removalLogs.has(legacy.pillKey)) {
+                const users = new Map<string, number>()
+                for (const userId of legacy.removedUsers ?? []) {
+                    if (userId) users.set(String(userId), safeTime)
+                }
+                if (users.size > 0) removalLogs.set(legacy.pillKey, users)
+            }
         }
 
         let persistQueue = Promise.resolve()
@@ -54,95 +107,105 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             }
         }
 
-        const persistState = () => {
-            const snapshot: ReactionStorage = {
-                activeRemovals: [...activeRemovals].map(([pillKey, users]) => ({
-                    pillKey,
-                    removedUsers: [...users],
-                    removedAt: removedAtByKey.get(pillKey) ?? Date.now(),
-                })),
-            }
-            persistQueue = persistQueue
-                .then(() => jsonStorage.set(snapshot, true))
-                .catch(error => {
-                    plugin.reportError('Failed to save removed reaction state: ' + String(error))
+        const makeKey = (payload: ReactionPayload): string | null => {
+            if (!payload.messageId) return null
+            const emojiPart = getEmojiPart(payload.emoji)
+            if (!emojiPart) return null
+            const reactionType = payload.reactionType === 1 || payload.burst === true ? 1 : 0
+            return keyFor(payload.messageId, emojiPart, reactionType)
+        }
+
+        const syncRemovalLogs = () => {
+            try {
+                const entries: RemovalLogEntry[] = [...removalLogs].map(([pillKey, users]) => {
+                    const removedUsers = [...users].map(([id, removedAt]) => ({ id, removedAt }))
+                    const removedAt = removedUsers.reduce(
+                        (latest, user) => Math.max(latest, user.removedAt),
+                        0,
+                    )
+                    return { pillKey, removedAt, removedUsers }
                 })
+                setRemovalLogs(JSON.stringify(entries))
+            } catch (error) {
+                plugin.reportError('Failed to sync removed-reaction logs: ' + String(error))
+            }
+        }
+
+        const syncRetainedPills = () => {
+            try {
+                setRetainedPills(JSON.stringify([...retainedPillKeys]))
+            } catch (error) {
+                plugin.reportError('Failed to sync retained reaction pills: ' + String(error))
+            }
         }
 
         const syncNative = () => {
-            try {
-                const entries = [...activeRemovals].map(([pillKey, users]) => ({
-                    pillKey,
-                    removedAt: removedAtByKey.get(pillKey) ?? Date.now(),
-                    removedUsers: [...users]
-                        .filter(userId => userId !== '*')
-                        .map(id => ({ id })),
-                }))
-                setRemoved(JSON.stringify(entries))
-            } catch (error) {
-                plugin.reportError('Failed to refresh removed reaction highlights: ' + String(error))
-            }
+            syncRemovalLogs()
+            syncRetainedPills()
         }
 
-        const makeKey = (payload: ReactionPayload): string | null => {
-            const emoji = payload.emoji
-            if (!emoji?.name || !payload.messageId) return null
+        const persistState = () => {
+            const snapshot: ReactionStorage = {
+                removalLogs: [...removalLogs].map(([pillKey, users]) => {
+                    const removedUsers = [...users].map(([id, removedAt]) => ({ id, removedAt }))
+                    const removedAt = removedUsers.reduce(
+                        (latest, user) => Math.max(latest, user.removedAt),
+                        0,
+                    )
+                    return { pillKey, removedAt, removedUsers }
+                }),
+                retainedPillKeys: [...retainedPillKeys],
+            }
 
-            const reactionType = payload.reactionType === 1 || payload.burst === true ? 1 : 0
-            const emojiKey = emoji.id ? emoji.name + ':' + emoji.id : emoji.name
-            return reactionKey(payload.messageId, emojiKey, reactionType)
+            persistQueue = persistQueue
+                .then(() => jsonStorage.set(snapshot, true))
+                .catch(error => {
+                    plugin.reportError('Failed to save reaction logs: ' + String(error))
+                })
         }
 
         const recordRemoval = (payload: ReactionPayload, key: string) => {
-            const userId = payload.userId || '*'
-            const token = key + '\u0000' + userId
-
-            // Ignore a duplicate gateway echo of the same removal.
-            if (userId !== '*' && pendingRemovalEchoes.delete(token)) return false
-            if (userId !== '*') pendingRemovalEchoes.add(token)
-
-            // A new removal supersedes a pending add echo for the same account.
-            if (userId !== '*') pendingAddEchoes.delete(token)
-
-            const users = activeRemovals.get(key) ?? new Set<string>()
-            users.add(userId)
-            activeRemovals.set(key, users)
-            removedAtByKey.set(key, Date.now())
-
-            persistState()
-            syncNative()
-            return true
+            const userId = getEventUserId(payload) ?? '*'
+            const users = removalLogs.get(key) ?? new Map<string, number>()
+            users.set(userId, Date.now())
+            removalLogs.set(key, users)
+            retainedPillKeys.add(key)
         }
 
-        // Clear only the account that added this emoji again. Other removed
-        // reactors on the same emoji must remain highlighted.
-        const clearActiveForUser = (key: string, userId: string) => {
-            const users = activeRemovals.get(key)
+        // Adding an emoji clears only that user's old removal log. The pill remains
+        // red while another removed reactor is still recorded for the same emoji.
+        const clearRemovalForUser = (key: string, userId: string): boolean => {
+            const users = removalLogs.get(key)
             if (!users || !users.delete(userId)) return false
 
             if (users.size === 0) {
-                activeRemovals.delete(key)
-                removedAtByKey.delete(key)
+                removalLogs.delete(key)
+                retainedPillKeys.delete(key)
             }
             return true
         }
 
-        const clearActiveMessage = (messageId?: string) => {
+        const clearMessage = (messageId?: string): boolean => {
             if (!messageId) return false
             const prefix = messageId + '|'
             let changed = false
 
-            for (const key of activeRemovals.keys()) {
+            for (const key of [...removalLogs.keys()]) {
                 if (key.startsWith(prefix)) {
-                    activeRemovals.delete(key)
-                    removedAtByKey.delete(key)
+                    removalLogs.delete(key)
                     changed = true
                 }
             }
-            for (const token of pendingRemovalEchoes) {
+            for (const key of [...retainedPillKeys]) {
+                if (key.startsWith(prefix)) {
+                    retainedPillKeys.delete(key)
+                    changed = true
+                }
+            }
+            for (const token of [...pendingRemovalEchoes]) {
                 if (token.startsWith(prefix)) pendingRemovalEchoes.delete(token)
             }
-            for (const token of pendingAddEchoes) {
+            for (const token of [...pendingAddEchoes]) {
                 if (token.startsWith(prefix)) pendingAddEchoes.delete(token)
             }
             return changed
@@ -155,19 +218,31 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     const key = makeKey(payload)
                     if (!key) return payload
 
-                    const recorded = recordRemoval(payload, key)
-                    if (!recorded) return undefined
+                    const userId = getEventUserId(payload) ?? '*'
+                    const token = key + '\u0000' + userId
 
-                    // Let Discord update our own "me" state. Otherwise tapping a
-                    // red pill keeps acting like a removal and cannot add it back.
-                    const currentUserId = getCurrentUserId()
-                    if (payload.userId && currentUserId && payload.userId === currentUserId) {
+                    // Record an optimistic remove once. Its gateway echo is still
+                    // allowed to update Discord, but must not create a second log.
+                    if (payload.optimistic) {
+                        pendingRemovalEchoes.add(token)
+                        recordRemoval(payload, key)
+                        persistState()
+                        syncNative()
                         return payload
                     }
 
-                    // For other users, keep the local reactor row so it can be
-                    // visibly marked red in Manage Reactions.
-                    return undefined
+                    if (pendingRemovalEchoes.delete(token)) {
+                        return payload
+                    }
+
+                    recordRemoval(payload, key)
+                    persistState()
+                    syncNative()
+
+                    // Never cancel the Flux removal. Discord must update the actual
+                    // reaction count and the current user's "me" state. The native
+                    // pill-retention layer independently keeps the red local pill.
+                    return payload
                 },
             ),
 
@@ -177,27 +252,23 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     const key = makeKey(payload)
                     if (!key) return payload
 
-                    const userId = payload.userId || getCurrentUserId() || '*'
-                    const token = key + '\u0000' + userId
+                    const userId = getEventUserId(payload) ?? getCurrentUserId()
+                    if (userId) {
+                        const token = key + '\u0000' + userId
 
-                    if (userId !== '*') {
-                        pendingRemovalEchoes.delete(token)
-
-                        // Apply an optimistic add once and ignore only its later
-                        // gateway echo, not the real local add action.
+                        // The optimistic local add has already updated Discord.
+                        // Suppress only its duplicate gateway echo.
                         if (!payload.optimistic && pendingAddEchoes.delete(token)) {
                             return undefined
                         }
                         if (payload.optimistic) pendingAddEchoes.add(token)
+
+                        if (clearRemovalForUser(key, userId)) {
+                            persistState()
+                            syncNative()
+                        }
                     }
 
-                    if (clearActiveForUser(key, userId)) {
-                        persistState()
-                        syncNative()
-                    }
-
-                    // Always pass the add through so Discord updates the count and
-                    // the current account's "me" state. The red marker is per-user.
                     return payload
                 },
             ),
@@ -205,7 +276,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             onFluxEventDispatched<ReactionPayload>(
                 'MESSAGE_REACTION_REMOVE_ALL',
                 payload => {
-                    if (clearActiveMessage(payload.messageId)) {
+                    if (clearMessage(payload.messageId)) {
                         persistState()
                         syncNative()
                     }
@@ -216,17 +287,21 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             onFluxEventDispatched<ReactionPayload>(
                 'MESSAGE_REACTION_REMOVE_EMOJI',
                 payload => {
-                    if (!payload.messageId || !payload.emoji?.name) return payload
-                    const emojiKey = payload.emoji.id
-                        ? payload.emoji.name + ':' + payload.emoji.id
-                        : payload.emoji.name
-                    const prefix = payload.messageId + '|' + emojiKey + '|'
+                    if (!payload.messageId || !payload.emoji) return payload
+                    const emojiPart = getEmojiPart(payload.emoji)
+                    if (!emojiPart) return payload
+                    const prefix = payload.messageId + '|' + emojiPart + '|'
                     let changed = false
 
-                    for (const key of activeRemovals.keys()) {
+                    for (const key of [...removalLogs.keys()]) {
                         if (key.startsWith(prefix)) {
-                            activeRemovals.delete(key)
-                            removedAtByKey.delete(key)
+                            removalLogs.delete(key)
+                            changed = true
+                        }
+                    }
+                    for (const key of [...retainedPillKeys]) {
+                        if (key.startsWith(prefix)) {
+                            retainedPillKeys.delete(key)
                             changed = true
                         }
                     }
@@ -242,7 +317,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             onFluxEventDispatched<ReactionPayload>(
                 'MESSAGE_DELETE',
                 payload => {
-                    if (clearActiveMessage(payload.id ?? payload.messageId)) {
+                    if (clearMessage(payload.id ?? payload.messageId)) {
                         persistState()
                         syncNative()
                     }
@@ -255,7 +330,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 payload => {
                     let changed = false
                     for (const messageId of payload.ids ?? []) {
-                        changed = clearActiveMessage(messageId) || changed
+                        changed = clearMessage(messageId) || changed
                     }
                     if (changed) {
                         persistState()
@@ -266,24 +341,19 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             ),
 
             () => {
-                activeRemovals.clear()
-                removedAtByKey.clear()
+                removalLogs.clear()
+                retainedPillKeys.clear()
                 pendingRemovalEchoes.clear()
                 pendingAddEchoes.clear()
                 try {
-                    clearRemoved()
+                    clearNativeState()
                 } catch (error) {
-                    plugin.reportError('Could not clear reaction highlights: ' + String(error))
+                    plugin.reportError('Could not clear native reaction-log state: ' + String(error))
                 }
             },
         )
 
-        // Restore locally saved red markers immediately after the plugin starts.
         syncNative()
         persistState()
     },
 })
-
-function reactionKey(messageId: string, emojiKey: string, reactionType: number) {
-    return messageId + '|' + emojiKey + '|' + reactionType
-}
