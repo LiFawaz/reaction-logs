@@ -31,9 +31,12 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
     start({ cleanup, plugin, jsonStorage }) {
         // Only the active local red-marker state is retained.
         const activeRemovals = new Map<string, Set<string>>()
+        const removedAtByKey = new Map<string, number>()
         for (const item of jsonStorage.cache?.activeRemovals ?? []) {
             if (!item?.pillKey) continue
             activeRemovals.set(item.pillKey, new Set(item.removedUsers ?? []))
+            const removedAt = Number(item.removedAt)
+            removedAtByKey.set(item.pillKey, Number.isFinite(removedAt) && removedAt > 0 ? removedAt : Date.now())
         }
 
         let persistQueue = Promise.resolve()
@@ -44,6 +47,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 activeRemovals: [...activeRemovals].map(([pillKey, users]) => ({
                     pillKey,
                     removedUsers: [...users],
+                    removedAt: removedAtByKey.get(pillKey) ?? Date.now(),
                 })),
             }
             persistQueue = persistQueue
@@ -57,6 +61,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             try {
                 const entries = [...activeRemovals].map(([pillKey, users]) => ({
                     pillKey,
+                    removedAt: removedAtByKey.get(pillKey) ?? Date.now(),
                     removedUsers: [...users]
                         .filter(userId => userId !== '*')
                         .map(id => ({ id })),
@@ -87,6 +92,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             const users = activeRemovals.get(key) ?? new Set<string>()
             users.add(userId)
             activeRemovals.set(key, users)
+            removedAtByKey.set(key, Date.now())
 
             persistState()
             syncNative()
@@ -94,7 +100,11 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         }
 
         // Any new use of this exact emoji resets its red marker completely.
-        const clearActiveForKey = (key: string) => activeRemovals.delete(key)
+        const clearActiveForKey = (key: string) => {
+            const removed = activeRemovals.delete(key)
+            removedAtByKey.delete(key)
+            return removed
+        }
 
         const clearActiveMessage = (messageId?: string) => {
             if (!messageId) return false
@@ -104,6 +114,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             for (const key of activeRemovals.keys()) {
                 if (key.startsWith(prefix)) {
                     activeRemovals.delete(key)
+                    removedAtByKey.delete(key)
                     changed = true
                 }
             }
@@ -164,6 +175,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     for (const key of activeRemovals.keys()) {
                         if (key.startsWith(prefix)) {
                             activeRemovals.delete(key)
+                            removedAtByKey.delete(key)
                             changed = true
                         }
                     }
@@ -204,6 +216,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
             () => {
                 activeRemovals.clear()
+                removedAtByKey.clear()
                 pendingRemovalEchoes.clear()
                 try {
                     clearRemoved()
