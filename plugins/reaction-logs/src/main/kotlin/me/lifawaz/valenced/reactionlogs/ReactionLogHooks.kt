@@ -53,12 +53,13 @@ internal class ReactionLogHooks(
 
     private val removedUsersByKey = LinkedHashMap<String, Set<String>>()
     private val removedAtByKey = LinkedHashMap<String, Long>()
+    private val retainedPillKeys = LinkedHashSet<String>()
+    private val retainedPillViews = WeakHashMap<ViewGroup, LinkedHashMap<String, LinearLayout>>()
     private val detailKeys = WeakHashMap<ViewGroup, String>()
     private val detailLabels = WeakHashMap<ViewGroup, TextView>()
     private val detailLogKeys = LinkedHashSet<String>()
     @Volatile private var use24HourClock = false
-    // Keep the actual rendered pill view when Discord drops its final reaction model.
-    private val retainedPillViews = LinkedHashMap<String, LinearLayout>()
+    // Keep real pill views per Flexbox so one message cannot steal another message's pill.
     private val boundPills = WeakHashMap<LinearLayout, String>()
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
@@ -80,7 +81,8 @@ internal class ReactionLogHooks(
         }
     }
 
-    fun setRemoved(json: String) {
+    /** Updates only per-user removal records and timestamps. */
+    fun setRemovalLogs(json: String) {
         val parsed = LinkedHashMap<String, Set<String>>()
         val parsedTimes = LinkedHashMap<String, Long>()
         val array = JSONArray(json)
@@ -99,7 +101,7 @@ internal class ReactionLogHooks(
                     users.add(id)
                 }
             }
-            parsed[key] = users
+            if (users.isNotEmpty()) parsed[key] = users
             parsedTimes[key] = item.optLong("removedAt", 0L)
         }
 
@@ -111,26 +113,8 @@ internal class ReactionLogHooks(
             removedAtByKey.clear()
             removedAtByKey.putAll(parsedTimes)
         }
-        val staleRetainedViews = synchronized(retainedPillViews) {
-            val stale = retainedPillViews
-                .filterKeys { it !in parsed.keys }
-                .values
-                .toList()
-            retainedPillViews.keys.retainAll(parsed.keys)
-            stale
-        }
 
         mainHandler.post {
-            // Remove an old retained pill when the same emoji is added again.
-            // Discord can then render the newly added reaction as a fresh pill.
-            staleRetainedViews.forEach { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
-                boundPills.remove(view)
-                applyPillStyle(view, false)
-            }
-            for ((pill, key) in boundPills.entries.toList()) {
-                applyPillStyle(pill, isRemoved(key))
-            }
             refreshUserRows()
             for ((container, key) in detailKeys.entries.toList()) {
                 applyDetailsTimestamp(container, key)
@@ -138,18 +122,55 @@ internal class ReactionLogHooks(
         }
     }
 
+    /** Updates only the keys whose rendered red reaction pills must be retained. */
+    fun setRetainedPills(json: String) {
+        val parsed = LinkedHashSet<String>()
+        val array = JSONArray(json)
+        for (index in 0 until array.length()) {
+            val key = array.optString(index).takeIf { it.isNotBlank() } ?: continue
+            parsed.add(key)
+        }
+
+        synchronized(retainedPillKeys) {
+            retainedPillKeys.clear()
+            retainedPillKeys.addAll(parsed)
+        }
+
+        mainHandler.post {
+            // Drop stale cached references without detaching a view Discord may have
+            // already rebound as a fresh reaction after an add event.
+            synchronized(retainedPillViews) {
+                for ((flexbox, views) in retainedPillViews.entries.toList()) {
+                    for ((key, view) in views.toMap()) {
+                        if (key !in parsed) {
+                            views.remove(key)
+                            boundPills.remove(view)
+                            applyPillStyle(view, false)
+                        }
+                    }
+                    if (views.isEmpty()) retainedPillViews.remove(flexbox)
+                }
+            }
+            for ((pill, key) in boundPills.entries.toList()) {
+                applyPillStyle(pill, isRemoved(key))
+            }
+        }
+    }
+
     fun clear() {
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
         synchronized(removedAtByKey) { removedAtByKey.clear() }
-        val retained = synchronized(retainedPillViews) {
-            retainedPillViews.values.toList().also { retainedPillViews.clear() }
-        }
+        synchronized(retainedPillKeys) { retainedPillKeys.clear() }
+
         mainHandler.post {
-            retained.forEach { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
-                boundPills.remove(view)
-                applyPillStyle(view, false)
+            for ((flexbox, views) in retainedPillViews.entries.toList()) {
+                for ((_, view) in views) {
+                    if (view.parent === flexbox) flexbox.removeView(view)
+                    boundPills.remove(view)
+                    applyPillStyle(view, false)
+                }
             }
+            retainedPillViews.clear()
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
             }
@@ -167,17 +188,19 @@ internal class ReactionLogHooks(
         unhooks.clear()
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
         synchronized(removedAtByKey) { removedAtByKey.clear() }
-        val retained = synchronized(retainedPillViews) {
-            retainedPillViews.values.toList().also { retainedPillViews.clear() }
-        }
+        synchronized(retainedPillKeys) { retainedPillKeys.clear() }
         detailsMessageId = null
         detailsEmojiPart = null
+
         mainHandler.post {
-            retained.forEach { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
-                boundPills.remove(view)
-                applyPillStyle(view, false)
+            for ((flexbox, views) in retainedPillViews.entries.toList()) {
+                for ((_, view) in views) {
+                    if (view.parent === flexbox) flexbox.removeView(view)
+                    boundPills.remove(view)
+                    applyPillStyle(view, false)
+                }
             }
+            retainedPillViews.clear()
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
             }
@@ -198,7 +221,7 @@ internal class ReactionLogHooks(
     }
 
     private fun isRemoved(key: String): Boolean =
-        synchronized(removedUsersByKey) { key in removedUsersByKey }
+        synchronized(retainedPillKeys) { key in retainedPillKeys }
 
     private fun removedUsersForReaction(messageId: String, emojiPart: String): Set<String> =
         synchronized(removedUsersByKey) {
@@ -272,75 +295,85 @@ internal class ReactionLogHooks(
 
         unhooks += onBindViewHolder.hook(
             before = { param ->
-                val index = param.args.getOrNull(1) as? Int
-                val item = index?.let {
-                    (adapterItems.get(param.thisObject) as List<*>?)?.getOrNull(it)
-                }
-                if (item != null && accessoryClass.isInstance(item)) {
-                    bindingMessageId.set(accessoryMessageId.invoke(item) as String?)
-                } else {
-                    bindingMessageId.remove()
-                }
-            },
-            after = { bindingMessageId.remove() },
-        )
-
-        unhooks += setReactions.hook(
-            before = { param ->
-                val messageId = bindingMessageId.get() ?: return@hook
                 val flexbox = param.thisObject as? ViewGroup ?: return@hook
+                val messageId = bindingMessageId.get()
+                val prefix = messageId?.let { "$it|" }
 
-                // Save the real pill view before Discord rebuilds this row. A proxy
-                // reaction model is not reliable because Discord may filter it out.
+                val cached = synchronized(retainedPillViews) {
+                    retainedPillViews.getOrPut(flexbox) { LinkedHashMap() }
+                }
+                if (prefix != null) {
+                    for ((oldKey, oldView) in cached.toMap()) {
+                        if (!oldKey.startsWith(prefix)) {
+                            cached.remove(oldKey)
+                            boundPills.remove(oldView)
+                            applyPillStyle(oldView, false)
+                        }
+                    }
+                }
+
+                // Capture the real red pill before Discord rebuilds the row.
                 for (index in 0 until flexbox.childCount) {
                     val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
                     val key = boundPills[pillView] ?: continue
-                    if (key.startsWith("$messageId|") && isRemoved(key)) {
-                        synchronized(retainedPillViews) {
-                            retainedPillViews[key] = pillView
-                        }
+                    if (isRemoved(key) && (prefix == null || key.startsWith(prefix))) {
+                        cached[key] = pillView
                     }
                 }
             },
             after = { param ->
-            val flexbox = param.thisObject as ViewGroup
-            val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
-            val messageId = bindingMessageId.get()
-            val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
-            val currentKeys = LinkedHashSet<String>()
+                val flexbox = param.thisObject as ViewGroup
+                val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
+                val messageId = bindingMessageId.get()
+                val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
+                val currentKeys = LinkedHashSet<String>()
 
-            for (index in 0 until flexbox.childCount) {
-                val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
-                val pill = reactionPills.getOrNull(index)
+                for (index in 0 until flexbox.childCount) {
+                    val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
+                    val pill = reactionPills.getOrNull(index)
 
-                if (pill == null || messageId == null || pill.count <= 0 || pill.emoji == null) {
-                    boundPills.remove(pillView)
-                    applyPillStyle(pillView, false)
-                    continue
+                    if (pill == null || pill.count <= 0 || pill.emoji == null) {
+                        val oldKey = boundPills[pillView]
+                        if (oldKey != null && isRemoved(oldKey)) {
+                            applyPillStyle(pillView, true)
+                        } else {
+                            boundPills.remove(pillView)
+                            applyPillStyle(pillView, false)
+                        }
+                        continue
+                    }
+
+                    val emoji = emojiKey(pill.emoji)
+                    if (emoji.isNullOrBlank()) {
+                        boundPills.remove(pillView)
+                        applyPillStyle(pillView, false)
+                        continue
+                    }
+
+                    val key = messageId?.let {
+                        reactionKey(it, emoji, if (pill.burst) 1 else 0)
+                    } ?: boundPills[pillView]
+
+                    if (key == null) {
+                        boundPills.remove(pillView)
+                        applyPillStyle(pillView, false)
+                        continue
+                    }
+
+                    currentKeys.add(key)
+                    boundPills[pillView] = key
+                    applyPillStyle(pillView, isRemoved(key))
                 }
 
-                val emoji = emojiKey(pill.emoji)
-                if (emoji.isNullOrBlank()) {
-                    boundPills.remove(pillView)
-                    applyPillStyle(pillView, false)
-                    continue
-                }
-
-                val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
-                currentKeys.add(key)
-                boundPills[pillView] = key
-                applyPillStyle(pillView, isRemoved(key))
-            }
-
-            // Reattach any removed pill whose reaction model disappeared from
-            // Discord's list. It remains visible and red until the matching add
-            // event clears this key from the active-removal state.
-            if (messageId != null) {
-                val prefix = "$messageId|"
+                val prefix = messageId?.let { "$it|" }
                 val retained = synchronized(retainedPillViews) {
-                    retainedPillViews.entries
-                        .filter { it.key.startsWith(prefix) && isRemoved(it.key) }
-                        .map { it.key to it.value }
+                    retainedPillViews[flexbox]
+                        ?.entries
+                        ?.filter { (key, _) ->
+                            isRemoved(key) && (prefix == null || key.startsWith(prefix))
+                        }
+                        ?.map { it.key to it.value }
+                        .orEmpty()
                 }
 
                 for ((key, pillView) in retained) {
@@ -348,15 +381,15 @@ internal class ReactionLogHooks(
                     if (pillView.parent !== flexbox) {
                         (pillView.parent as? ViewGroup)?.removeView(pillView)
                         runCatching { flexbox.addView(pillView) }.onFailure {
-                            XposedBridge.log("Reaction Logs: could not retain removed pill: $it")
+                            XposedBridge.log("Reaction Logs: could not reattach retained reaction pill: $it")
                         }
                     }
                     boundPills[pillView] = key
                     countText(pillView)?.text = "0"
                     applyPillStyle(pillView, true)
                 }
-            }
             },
+
         )
     }
 
@@ -372,265 +405,51 @@ internal class ReactionLogHooks(
         val getModel = providerClass.methods.firstOrNull {
             it.name == "get" && it.parameterCount == 0
         } ?: error("ManageReactionsModelProvider.get not found")
-        val emojiClass = dexFinder.findClass {
-            matcher { addUsingString("MessageReactionEmoji(name=") }
-        } ?: error("MessageReactionEmoji model class not found")
 
-        // Some Discord versions call the generic RecyclerView binder, while
-        // others dispatch through a typed onConfigure(int, UserRowModel) method.
-        // Discover the concrete row-model types from the provider's live model and
-        // hook their typed binders as well as the generic fallback.
-        val hookedTypedBinders = LinkedHashSet<Method>()
-        unhooks += getModel.hook(
-            before = { param ->
-                detailsMessageId = runCatching {
-                    messageIdGetter.invoke(param.thisObject)?.toString()
-                }.getOrNull()
-            },
-            after = { param ->
-                val model = param.result ?: param.thisObject
-                val selectedEmoji = findSelectedEmojiKey(model, emojiClass)
-                    ?: findSelectedEmojiKey(param.thisObject, emojiClass)
-                detailsEmojiPart = selectedEmoji
-                detailLogOnce(
-                    "selected-reaction",
-                    if (selectedEmoji == null) {
-                        "selected reaction emoji was not found in Manage Reactions model"
-                    } else {
-                        "selected reaction emoji resolved as $selectedEmoji"
-                    },
-                )
-                refreshUserRows()
-                val candidates = collectUserRowDataClasses(model)
-                detailLogOnce(
-                    "user-model-discovery",
-                    "Manage Reactions model exposed ${candidates.size} possible user-row model types",
-                )
+        unhooks += getModel.hook(before = { param ->
+            detailsMessageId = runCatching {
+                messageIdGetter.invoke(param.thisObject)?.toString()
+            }.getOrNull()
+            detailsEmojiPart = null
+        })
 
-                for (type in candidates) {
-                    val configure = runCatching {
-                        dexFinder.findMethod {
-                            matcher {
-                                name("onConfigure")
-                                paramCount(2)
-                                paramTypes("int", type.name)
-                            }
-                        }
-                    }.getOrNull() ?: continue
-
-                    val shouldHook = synchronized(hookedTypedBinders) {
-                        hookedTypedBinders.add(configure)
-                    }
-                    if (!shouldHook) continue
-
-                    runCatching {
-                        configure.isAccessible = true
-                        unhooks += configure.hook(after = { rowParam ->
-                            val data = rowParam.args.getOrNull(1) ?: return@hook
-                            if (!type.isInstance(data)) return@hook
-                            bindUserRowFromHolder(rowParam.thisObject, data)
-                        })
-                        detailLogOnce(
-                            "typed-user-binder-${type.name}",
-                            "hooked typed reaction-user binder for ${type.name}",
-                        )
-                    }.onFailure {
-                        XposedBridge.log(
-                            "Reaction Logs: could not hook typed user-row binder ${type.name}: $it",
-                        )
-                    }
-                }
-            },
-        )
-
-        // Keep a generic fallback for app versions that route through the base holder.
         val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
-        val genericConfigure = generateSequence(holderBase) { it.superclass }
-            .flatMap { it.declaredMethods.asSequence() }
-            .firstOrNull {
-                it.name == "onConfigure" &&
-                    it.parameterCount == 2 &&
-                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                    it.parameterTypes[1] == Any::class.java
-            }
+        val configure = holderBase.declaredMethods.firstOrNull {
+            it.name == "onConfigure" &&
+                it.parameterCount == 2 &&
+                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                it.parameterTypes[1] == Any::class.java
+        } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
+        configure.isAccessible = true
 
-        if (genericConfigure != null) {
-            runCatching {
-                genericConfigure.isAccessible = true
-                unhooks += genericConfigure.hook(after = { param ->
-                    val messageId = detailsMessageId ?: return@hook
-                    val holder = param.thisObject
-                    val data = param.args.getOrNull(1) ?: return@hook
-                    val dataName = data.javaClass.name
-                    val userId = extractUserId(data) ?: return@hook
-                    val isUserRow =
-                        holder.javaClass.name.contains("ManageReactions", ignoreCase = true) ||
-                        dataName.contains("User", ignoreCase = true) ||
-                        dataName.contains("Member", ignoreCase = true)
-                    if (!isUserRow) return@hook
-                    val itemView = holderItemView(holder) ?: return@hook
-                    detailLogOnce(
-                        "generic-user-row-bound",
-                        "generic reaction-user binder matched ${dataName.substringAfterLast('.')} for user $userId",
-                    )
-                    bindUserRow(itemView, messageId, userId)
-                })
-            }.onFailure {
-                XposedBridge.log("Reaction Logs: generic user-row binder unavailable: $it")
-            }
-        }
+        unhooks += configure.hook(after = { param ->
+            val messageId = detailsMessageId ?: return@hook
+            val holder = param.thisObject
+            val data = param.args.getOrNull(1) ?: return@hook
+            val holderName = holder.javaClass.name
+            val dataName = data.javaClass.name
 
-        detailLogOnce("user-hook-installed", "reaction-user row hooks installed")
-    }
-
-    private fun findSelectedEmojiKey(root: Any?, emojiClass: Class<*>): String? {
-        val visited = java.util.Collections.newSetFromMap(
-            java.util.IdentityHashMap<Any, Boolean>(),
-        )
-
-        fun visit(value: Any?, depth: Int): String? {
-            if (value == null || depth > 4 || !visited.add(value)) return null
-            if (emojiClass.isInstance(value)) return emojiKey(value)
-
-            val type = value.javaClass
+            // Do not touch unrelated RecyclerViews. Manage Reactions has a dedicated
+            // holder family; the data-class check is a fallback for renamed holders.
             if (
-                type.isPrimitive || type.isEnum || value is String ||
-                type.name.startsWith("android.") || type.name.startsWith("java.")
-            ) return null
-
-            val getterNames = setOf(
-                "getSelectedReaction",
-                "getReaction",
-                "getSelectedEmoji",
-                "getEmoji",
-            )
-            val getters = type.methods
-                .filter { it.parameterCount == 0 && it.name in getterNames }
-                .sortedBy {
-                    when (it.name) {
-                        "getSelectedReaction" -> 0
-                        "getReaction" -> 1
-                        "getSelectedEmoji" -> 2
-                        else -> 3
-                    }
-                }
-            for (getter in getters) {
-                val nested = runCatching { getter.invoke(value) }.getOrNull()
-                visit(nested, depth + 1)?.let { return it }
-            }
-
-            val fields = instanceFields(type)
-                .filter { field ->
-                    val name = field.name.lowercase()
-                    name.contains("selected") || name == "reaction" ||
-                        name.contains("reaction") || name == "emoji" ||
-                        name.contains("emoji")
-                }
-                .sortedBy {
-                    val name = it.name.lowercase()
-                    when {
-                        name.contains("selected") && name.contains("reaction") -> 0
-                        name.contains("selected") && name.contains("emoji") -> 1
-                        name == "reaction" -> 2
-                        name.contains("reaction") -> 3
-                        else -> 4
-                    }
-                }
-
-            for (field in fields) {
-                val nested = runCatching {
-                    field.isAccessible = true
-                    field.get(value)
-                }.getOrNull() ?: continue
-                if (nested is Iterable<*> || nested is Map<*, *> || nested is Array<*>) {
-                    if (!field.name.contains("selected", ignoreCase = true)) continue
-                }
-                visit(nested, depth + 1)?.let { return it }
-            }
-            return null
-        }
-
-        return visit(root, 0)
-    }
-
-    private fun collectUserRowDataClasses(root: Any?): LinkedHashSet<Class<*>> {
-        val found = LinkedHashSet<Class<*>>()
-        val visited = java.util.Collections.newSetFromMap(
-            java.util.IdentityHashMap<Any, Boolean>(),
-        )
-
-        fun visit(value: Any?, depth: Int) {
-            if (value == null || depth > 4 || !visited.add(value)) return
-
-            when (value) {
-                is Iterable<*> -> {
-                    value.take(100).forEach { visit(it, depth + 1) }
-                    return
-                }
-                is Map<*, *> -> {
-                    value.values.take(100).forEach { visit(it, depth + 1) }
-                    return
-                }
-                is Array<*> -> {
-                    value.take(100).forEach { visit(it, depth + 1) }
-                    return
-                }
-            }
-
-            val type = value.javaClass
-            if (type.isPrimitive || type.isEnum || type == String::class.java) return
-
-            val lowerName = type.name.lowercase()
-            val hasUserIdAccessor = type.methods.any {
-                it.parameterCount == 0 && it.name in setOf("getUserId", "getUserID")
-            }
-            val hasUserField = instanceFields(type).any {
-                val name = it.name.lowercase()
-                name == "userid" || name == "memberid" ||
-                    name == "user" || name == "member"
-            }
-            if (
-                lowerName.contains("user") || lowerName.contains("member") ||
-                hasUserIdAccessor || hasUserField
+                !holderName.contains("ManageReactions", ignoreCase = true) &&
+                !dataName.contains("User", ignoreCase = true) &&
+                !dataName.contains("Member", ignoreCase = true)
             ) {
-                found.add(type)
+                return@hook
             }
 
-            if (depth == 4) return
-            for (field in instanceFields(type).take(40)) {
-                val fieldName = field.name.lowercase()
-                val fieldType = field.type
-                if (
-                    fieldType.isPrimitive || fieldType.isEnum ||
-                    fieldType == String::class.java || fieldType.name.startsWith("android.")
-                ) {
-                    continue
-                }
-                val nested = runCatching {
-                    field.isAccessible = true
-                    field.get(value)
-                }.getOrNull() ?: continue
-                val collectionLike =
-                    nested is Iterable<*> || nested is Map<*, *> || nested is Array<*>
-                if (
-                    collectionLike || fieldName.contains("user") ||
-                    fieldName.contains("member") || fieldName.contains("reaction") ||
-                    fieldName.contains("item") || fieldName.contains("data")
-                ) {
-                    visit(nested, depth + 1)
-                }
+            val itemView = holderItemView(holder) ?: return@hook
+            val userId = extractUserId(data)
+            if (userId == null) {
+                XposedBridge.log("Reaction Logs: could not read user ID from reaction-detail row $dataName")
+                return@hook
             }
-        }
 
-        visit(root, 0)
-        return found
-    }
+            bindUserRow(itemView, messageId, userId)
+        })
 
-    private fun bindUserRowFromHolder(holder: Any, data: Any) {
-        val messageId = detailsMessageId ?: return
-        val userId = extractUserId(data) ?: return
-        val itemView = holderItemView(holder) ?: return
-        bindUserRow(itemView, messageId, userId)
+        XposedBridge.log("Reaction Logs: reaction-user row hook installed")
     }
 
     private fun hookReactionDetails(dexFinder: DexFinder) {
@@ -662,6 +481,14 @@ internal class ReactionLogHooks(
             it.type == emojiClass
         } ?: error("MessageReaction emoji field not found on ${reactionField.type.name}")
         emojiField.isAccessible = true
+        val selectedField = instanceFields(emojiItemClass).firstOrNull {
+            it.name == "isSelected" && it.type == Boolean::class.javaPrimitiveType
+        }?.apply { isAccessible = true }
+        val selectedGetter = emojiItemClass.methods.firstOrNull {
+            (it.name == "isSelected" || it.name == "getIsSelected") &&
+                it.parameterCount == 0 &&
+                (it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.java)
+        }
 
         // First search only by the exact runtime signature. The old search required
         // the DEX string "data", which can disappear when Kotlin compiler output changes.
@@ -685,6 +512,25 @@ internal class ReactionLogHooks(
             val data = param.args.getOrNull(1)
             detailLogOnce("typed-row-hit", "typed reaction emoji row binder was called")
             if (data != null && emojiItemClass.isInstance(data)) {
+                val selected = runCatching {
+                    selectedField?.getBoolean(data)
+                        ?: (selectedGetter?.invoke(data) as? Boolean)
+                        ?: false
+                }.getOrDefault(false)
+
+                if (selected) {
+                    val selectedReaction = runCatching { reactionField.get(data) }.getOrNull()
+                    val selectedEmoji = selectedReaction?.let {
+                        runCatching { emojiField.get(it) }.getOrNull()
+                    }
+                    val selectedKey = selectedEmoji?.let { emojiKey(it) }
+                    if (!selectedKey.isNullOrBlank()) {
+                        detailsEmojiPart = selectedKey
+                        mainHandler.post { refreshUserRows() }
+                        detailLogOnce("selected-emoji-bound", "selected reaction emoji row resolved as $selectedKey")
+                    }
+                }
+
                 mainHandler.post {
                     bindDetailsRow(holder, data, reactionField, emojiField)
                 }
