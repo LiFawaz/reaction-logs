@@ -2,7 +2,7 @@ name: Build Reaction Logs
 
 on:
   push:
-    branches: [main, test/reaction-details-timestamp-v1.3.0, test/reaction-user-tracking-v1.3.1]
+    branches: [main, test/reaction-details-timestamp-v1.3.0, test/reaction-user-tracking-v1.3.1, test/reaction-logs-separate-paths-v1.3.2]
   pull_request:
   workflow_dispatch:
 
