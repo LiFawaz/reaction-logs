@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - test/reaction-details-timestamp
+      - test/reaction-logs-session-red-profile
   workflow_dispatch:
 
 permissions:
