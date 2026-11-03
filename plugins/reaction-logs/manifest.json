@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Keep removed reaction pills red locally until the same emoji is added again.",
-  "version": "1.2.9",
+  "description": "Highlight removed reaction pills and affected profiles in reaction details.",
+  "version": "1.3.3",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
