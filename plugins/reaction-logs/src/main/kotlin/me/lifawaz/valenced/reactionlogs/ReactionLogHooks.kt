@@ -2,12 +2,14 @@ package me.lifawaz.valenced.reactionlogs
 
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.Looper
-import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextSwitcher
 import android.widget.TextView
@@ -19,12 +21,8 @@ import org.json.JSONArray
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.LinkedHashMap
 import java.util.LinkedHashSet
-import java.util.Locale
-import java.util.TimeZone
 import java.util.WeakHashMap
 
 private const val SHORTCUTS_FLEXBOX = "com.discord.reactions.ShortcutsFlexbox"
@@ -34,8 +32,6 @@ private const val MG_RECYCLER_VIEW_HOLDER =
     "com.discord.utilities.mg_recycler.MGRecyclerViewHolder"
 private const val REACTION_MESSAGE_EXTRA = "com.discord.intent.extra.EXTRA_MESSAGE_ID"
 private const val REACTION_EMOJI_ITEM_PREFIX = "ReactionEmojiItem(reaction="
-private const val REACTION_EMOJI_CONTAINER_ID = "manage_reactions_emoji_container"
-private const val REACTION_EMOJI_VIEW_ID = "manage_reactions_emoji_emoji_textview"
 
 private val REMOVED_RED = Color.rgb(237, 66, 69)
 private val REMOVED_TINT = Color.argb(48, 237, 66, 69)
@@ -52,19 +48,16 @@ internal class ReactionLogHooks(
     private data class UserRowBinding(val messageId: String, val userId: String)
 
     private val removedUsersByKey = LinkedHashMap<String, Set<String>>()
-    private val removedAtByKey = LinkedHashMap<String, Long>()
     private val retainedPillKeys = LinkedHashSet<String>()
     private val retainedPillViews = WeakHashMap<ViewGroup, LinkedHashMap<String, LinearLayout>>()
-    private val detailKeys = WeakHashMap<ViewGroup, String>()
-    private val detailLabels = WeakHashMap<ViewGroup, TextView>()
     private val detailLogKeys = LinkedHashSet<String>()
-    @Volatile private var use24HourClock = false
     // Keep real pill views per Flexbox so one message cannot steal another message's pill.
     private val boundPills = WeakHashMap<LinearLayout, String>()
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
     private val originalUserTextColors = WeakHashMap<TextView, ColorStateList>()
     private val originalUserRowTints = WeakHashMap<View, ColorStateList?>()
+    private val originalAvatarForegrounds = WeakHashMap<View, Drawable?>()
     @Volatile private var detailsMessageId: String? = null
     @Volatile private var detailsEmojiPart: String? = null
     private val bindingMessageId = ThreadLocal<String?>()
@@ -84,7 +77,6 @@ internal class ReactionLogHooks(
     /** Updates only per-user removal records and timestamps. */
     fun setRemovalLogs(json: String) {
         val parsed = LinkedHashMap<String, Set<String>>()
-        val parsedTimes = LinkedHashMap<String, Long>()
         val array = JSONArray(json)
 
         for (index in 0 until array.length()) {
@@ -102,23 +94,15 @@ internal class ReactionLogHooks(
                 }
             }
             if (users.isNotEmpty()) parsed[key] = users
-            parsedTimes[key] = item.optLong("removedAt", 0L)
         }
 
         synchronized(removedUsersByKey) {
             removedUsersByKey.clear()
             removedUsersByKey.putAll(parsed)
         }
-        synchronized(removedAtByKey) {
-            removedAtByKey.clear()
-            removedAtByKey.putAll(parsedTimes)
-        }
 
         mainHandler.post {
             refreshUserRows()
-            for ((container, key) in detailKeys.entries.toList()) {
-                applyDetailsTimestamp(container, key)
-            }
         }
     }
 
@@ -159,7 +143,6 @@ internal class ReactionLogHooks(
 
     fun clear() {
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
-        synchronized(removedAtByKey) { removedAtByKey.clear() }
         synchronized(retainedPillKeys) { retainedPillKeys.clear() }
 
         mainHandler.post {
@@ -177,9 +160,6 @@ internal class ReactionLogHooks(
             for (row in userRows.keys.toList()) {
                 applyUserRowStyle(row, false)
             }
-            for ((container, key) in detailKeys.entries.toList()) {
-                applyDetailsTimestamp(container, key)
-            }
         }
     }
 
@@ -187,7 +167,6 @@ internal class ReactionLogHooks(
         unhooks.forEach { it.unhook() }
         unhooks.clear()
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
-        synchronized(removedAtByKey) { removedAtByKey.clear() }
         synchronized(retainedPillKeys) { retainedPillKeys.clear() }
         detailsMessageId = null
         detailsEmojiPart = null
@@ -207,16 +186,12 @@ internal class ReactionLogHooks(
             for (row in userRows.keys.toList()) {
                 applyUserRowStyle(row, false)
             }
-            for ((container, label) in detailLabels.entries.toList()) {
-                if (label.parent === container) container.removeView(label)
-            }
             boundPills.clear()
             originalPillStyles.clear()
             userRows.clear()
             originalUserTextColors.clear()
             originalUserRowTints.clear()
-            detailKeys.clear()
-            detailLabels.clear()
+            originalAvatarForegrounds.clear()
         }
     }
 
@@ -550,9 +525,6 @@ internal class ReactionLogHooks(
                     }
                 }
 
-                mainHandler.post {
-                    bindDetailsRow(holder, data, reactionField, emojiField)
-                }
             } else {
                 detailLogOnce(
                     "typed-row-data-mismatch",
@@ -579,9 +551,6 @@ internal class ReactionLogHooks(
                 val data = param.args.getOrNull(1)
                 if (data != null && emojiItemClass.isInstance(data)) {
                     detailLogOnce("generic-row-hit", "generic reaction row binder was called")
-                    mainHandler.post {
-                        bindDetailsRow(holder, data, reactionField, emojiField)
-                    }
                 }
             })
         }
@@ -642,204 +611,6 @@ internal class ReactionLogHooks(
         if (shouldLog) XposedBridge.log("Reaction Logs: $message")
     }
 
-    private fun bindDetailsRow(
-        holder: Any,
-        data: Any?,
-        reactionField: Field,
-        emojiField: Field,
-    ) {
-        if (data == null) return
-        val reaction = runCatching { reactionField.get(data) }.getOrNull() ?: run {
-            detailLogOnce("reaction-read-failed", "could not read the reaction object from the popup row")
-            return
-        }
-        val emoji = runCatching { emojiField.get(reaction) }.getOrNull() ?: run {
-            detailLogOnce("emoji-read-failed", "could not read the emoji object from the reaction")
-            return
-        }
-
-        val itemView = holderItemView(holder) ?: run {
-            detailLogOnce(
-                "item-view-missing",
-                "row binder ran, but no RecyclerView itemView was found on ${holder.javaClass.name}",
-            )
-            return
-        }
-        val container = reactionEmojiContainer(itemView) ?: run {
-            detailLogOnce(
-                "emoji-container-missing",
-                "row binder ran, but the emoji TextView/container was not found; itemView=${itemView.javaClass.name}",
-            )
-            return
-        }
-        val emojiPart = emojiKey(emoji) ?: run {
-            detailLogOnce(
-                "emoji-key-missing",
-                "row binder ran, but could not read the emoji name/ID from ${emoji.javaClass.name}",
-            )
-            return
-        }
-        val messageId = readMessageIdFromContext(itemView.context) ?: detailsMessageId
-        val key = if (messageId.isNullOrBlank()) emojiPart else "$messageId|$emojiPart"
-
-        detailKeys[container] = key
-        detailLogOnce(
-            "row-bound",
-            "popup emoji row bound; emoji=$emojiPart; messageId=${messageId ?: "unavailable"}; " +
-                "container=${container.javaClass.name}",
-        )
-        applyDetailsTimestamp(container, key)
-    }
-
-    private fun readMessageIdFromContext(context: android.content.Context): String? {
-        var current: android.content.Context? = context
-        val visited = HashSet<android.content.Context>()
-        while (current != null && visited.add(current)) {
-            if (current is android.app.Activity) {
-                val id = runCatching {
-                    current.intent?.getLongExtra(REACTION_MESSAGE_EXTRA, 0L) ?: 0L
-                }.getOrDefault(0L)
-                if (id > 0L) return id.toString()
-            }
-            current = (current as? android.content.ContextWrapper)?.baseContext
-        }
-        return null
-    }
-
-    private fun reactionEmojiContainer(itemView: View): ViewGroup? {
-        val resources = itemView.resources
-        val packageName = itemView.context.packageName
-        val containerId = resources.getIdentifier(
-            REACTION_EMOJI_CONTAINER_ID,
-            "id",
-            packageName,
-        ).takeIf { it != 0 } ?: resources.getIdentifier(
-            REACTION_EMOJI_CONTAINER_ID,
-            "id",
-            "com.discord",
-        )
-        val emojiId = resources.getIdentifier(
-            REACTION_EMOJI_VIEW_ID,
-            "id",
-            packageName,
-        ).takeIf { it != 0 } ?: resources.getIdentifier(
-            REACTION_EMOJI_VIEW_ID,
-            "id",
-            "com.discord",
-        )
-
-        val emojiView = (if (emojiId != 0) {
-            itemView.findViewById<View>(emojiId)
-        } else {
-            null
-        }) ?: findEmojiView(itemView) ?: return null
-
-        val container = if (containerId != 0) {
-            itemView.findViewById<View>(containerId) as? ViewGroup
-        } else {
-            null
-        } ?: (emojiView.parent as? ViewGroup) ?: return null
-
-        ensureDetailsLabel(container, emojiView)
-        return container
-    }
-
-    private fun findEmojiView(root: View): View? {
-        if (root.javaClass.name.contains("SimpleDraweeSpanTextView")) return root
-        if (root !is ViewGroup) return null
-
-        for (index in 0 until root.childCount) {
-            findEmojiView(root.getChildAt(index))?.let { return it }
-        }
-        return null
-    }
-
-    private fun ensureDetailsLabel(container: ViewGroup, emojiView: View): TextView {
-        detailLabels[container]?.let { existing ->
-            if (existing.parent === container) return existing
-            detailLabels.remove(container)
-        }
-
-        val label = TextView(container.context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-            setTextColor(REMOVED_RED)
-            gravity = Gravity.CENTER_VERTICAL
-            includeFontPadding = false
-            maxLines = 1
-            typeface = (emojiView as? TextView)?.typeface
-            visibility = View.GONE
-        }
-        val margin = (3f * container.resources.displayMetrics.density).toInt()
-        val layoutParams: ViewGroup.LayoutParams = if (container is LinearLayout) {
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply {
-                marginStart = margin
-                gravity = Gravity.CENTER_VERTICAL
-            }
-        } else {
-            ViewGroup.MarginLayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply {
-                marginStart = margin
-            }
-        }
-        val insertIndex = (container.indexOfChild(emojiView) + 1).coerceIn(0, container.childCount)
-        container.addView(label, insertIndex, layoutParams)
-        detailLabels[container] = label
-        return label
-    }
-
-    private fun applyDetailsTimestamp(container: ViewGroup, key: String) {
-        val exactPrefix = if (key.contains("|")) "$key|" else null
-        val timestamp = synchronized(removedAtByKey) {
-            val exact = exactPrefix?.let { prefix ->
-                removedAtByKey.entries.asSequence()
-                    .filter { it.key.startsWith(prefix) && it.value > 0L }
-                    .maxOfOrNull { it.value }
-            }
-            if (exact != null) {
-                exact
-            } else {
-                // If Discord no longer exposes the provider's message ID, only use
-                // a cross-message match when that emoji appears in one message.
-                val emojiPart = key.substringAfter('|', key)
-                val matches = removedAtByKey.entries.filter { entry ->
-                    val parts = entry.key.split('|')
-                    parts.size == 3 && parts[1] == emojiPart && entry.value > 0L
-                }
-                val messageIds = matches.map { it.key.substringBefore('|') }.distinct()
-                if (messageIds.size == 1) matches.maxOfOrNull { it.value } else null
-            }
-        }
-        val label = detailLabels[container] ?: return
-        if (timestamp == null) {
-            detailLogOnce(
-                "timestamp-not-matched",
-                "popup row was found but no saved removal timestamp matched key=${key.take(64)}",
-            )
-            label.visibility = View.GONE
-            return
-        }
-
-        detailLogOnce(
-            "timestamp-matched",
-            "saved removal timestamp matched popup row key=${key.take(64)}",
-        )
-        label.text = "removed at ${formatLocalTime(timestamp)}"
-        label.visibility = View.VISIBLE
-    }
-
-    private fun formatLocalTime(timestamp: Long): String {
-        val pattern = if (use24HourClock) "HH:mm" else "h:mm a"
-        val locale = if (use24HourClock) Locale.ROOT else Locale.US
-        return SimpleDateFormat(pattern, locale).apply {
-            timeZone = TimeZone.getDefault()
-        }.format(Date(timestamp))
-    }
-
     private fun bindUserRow(view: View, messageId: String, userId: String) {
         userRows[view] = UserRowBinding(messageId, userId)
         mainHandler.post {
@@ -876,6 +647,45 @@ internal class ReactionLogHooks(
                 child.setTextColor(originalUserTextColors.remove(child))
             }
         }
+        applyAvatarStyle(view, highlighted)
+    }
+
+    private fun applyAvatarStyle(row: View, highlighted: Boolean) {
+        if (highlighted) {
+            var avatar: View? = null
+            visitViews(row) { child ->
+                if (avatar == null && child !== row && isAvatarView(child)) avatar = child
+            }
+            val target = avatar ?: return
+            if (!originalAvatarForegrounds.containsKey(target)) {
+                val original = target.foreground
+                originalAvatarForegrounds[target] = original
+                val stroke = (2f * target.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+                val ring = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.TRANSPARENT)
+                    setStroke(stroke, REMOVED_RED)
+                }
+                target.foreground = if (original == null) ring else LayerDrawable(arrayOf(original, ring))
+            }
+            return
+        }
+
+        visitViews(row) { child ->
+            if (originalAvatarForegrounds.containsKey(child)) {
+                child.foreground = originalAvatarForegrounds.remove(child)
+            }
+        }
+    }
+
+    private fun isAvatarView(view: View): Boolean {
+        val className = view.javaClass.name.lowercase()
+        if (className.contains("avatar") || className.contains("drawee")) return true
+        if (view !is ImageView) return false
+        val minSize = (20f * view.resources.displayMetrics.density).toInt()
+        val width = if (view.width > 0) view.width else view.layoutParams?.width ?: 0
+        val height = if (view.height > 0) view.height else view.layoutParams?.height ?: 0
+        return (width <= 0 || width >= minSize) && (height <= 0 || height >= minSize)
     }
 
     private fun visitViews(view: View, action: (View) -> Unit) {
