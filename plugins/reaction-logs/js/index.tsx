@@ -61,37 +61,9 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
         const cache = jsonStorage.cache ?? DefaultStorage
 
-        // Load the separated format first.
-        for (const entry of cache.removalLogs ?? []) {
-            if (!entry?.pillKey) continue
-            const users = new Map<string, number>()
-            for (const user of entry.removedUsers ?? []) {
-                if (!user?.id) continue
-                const timestamp = Number(user.removedAt ?? entry.removedAt ?? Date.now())
-                users.set(String(user.id), Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now())
-            }
-            if (users.size > 0) removalLogs.set(entry.pillKey, users)
-        }
-
-        for (const key of cache.retainedPillKeys ?? []) {
-            if (typeof key === 'string' && key.length > 0) retainedPillKeys.add(key)
-        }
-
-        // Migrate older 1.3.0/1.3.1 local data without merging the two states again.
-        for (const legacy of cache.activeRemovals ?? []) {
-            if (!legacy?.pillKey) continue
-            const timestamp = Number(legacy.removedAt ?? Date.now())
-            const safeTime = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now()
-            if (!retainedPillKeys.has(legacy.pillKey)) retainedPillKeys.add(legacy.pillKey)
-            if (!removalLogs.has(legacy.pillKey)) {
-                const users = new Map<string, number>()
-                for (const userId of legacy.removedUsers ?? []) {
-                    if (userId) users.set(String(userId), safeTime)
-                }
-                if (users.size > 0) removalLogs.set(legacy.pillKey, users)
-            }
-        }
-
+        // Session-only state: do not restore previous runs after a full app restart.
+        // Events are persisted while this process is alive, but the next app start
+        // begins with an empty log.
         let persistQueue = Promise.resolve()
         const pendingRemovalEchoes = new Set<string>()
         const pendingAddEchoes = new Set<string>()
@@ -345,6 +317,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 retainedPillKeys.clear()
                 pendingRemovalEchoes.clear()
                 pendingAddEchoes.clear()
+                persistState()
                 try {
                     clearNativeState()
                 } catch (error) {
