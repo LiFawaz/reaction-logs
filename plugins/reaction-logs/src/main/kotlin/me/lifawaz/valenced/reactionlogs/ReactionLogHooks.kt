@@ -18,6 +18,7 @@ import app.valenced.xposed.api.DexFinder
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.util.LinkedHashMap
@@ -58,6 +59,7 @@ internal class ReactionLogHooks(
     private val bindingMessageId = ThreadLocal<String?>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val unhooks = mutableListOf<XC_MethodHook.Unhook>()
+    private val detailLogKeys = LinkedHashSet<String>()
 
     init {
         hookReactionPills(dexFinder)
@@ -168,17 +170,19 @@ internal class ReactionLogHooks(
     private fun isRemoved(key: String): Boolean =
         synchronized(removedUsersByKey) { key in removedUsersByKey }
 
-    private fun removedUsersForMessage(messageId: String, emojiKey: String?): Set<String> =
-        synchronized(removedUsersByKey) {
+    private fun removedUsersForMessage(messageId: String, emojiKey: String?): Set<String> {
+        // Never highlight a user based on a different emoji. If Discord does not
+        // expose the popup's selected emoji, leave the user list unchanged.
+        if (emojiKey.isNullOrBlank()) return emptySet()
+        return synchronized(removedUsersByKey) {
+            val prefix = "$messageId|$emojiKey|"
             removedUsersByKey.entries
                 .asSequence()
-                .filter { (key, _) ->
-                    key.startsWith("$messageId|") &&
-                        (emojiKey.isNullOrBlank() || key.startsWith("$messageId|$emojiKey|"))
-                }
+                .filter { it.key.startsWith(prefix) }
                 .flatMap { it.value.asSequence() }
                 .toSet()
         }
+    }
 
     private fun isRemovedUser(messageId: String, userId: String): Boolean =
         userId in removedUsersForMessage(messageId, detailsEmojiKey)
@@ -339,95 +343,280 @@ internal class ReactionLogHooks(
         val getModel = providerClass.methods.firstOrNull {
             it.name == "get" && it.parameterCount == 0
         } ?: error("ManageReactionsModelProvider.get not found")
+        val emojiClass = dexFinder.findClass {
+            matcher { addUsingString("MessageReactionEmoji(name=") }
+        } ?: error("MessageReactionEmoji model class not found")
 
-        unhooks += getModel.hook(after = { param ->
-            detailsMessageId = runCatching {
-                messageIdGetter.invoke(param.thisObject)?.toString()
-            }.getOrNull()
-            detailsEmojiKey = selectedEmojiKey(param.result)
-                ?: selectedEmojiKey(param.thisObject)
-        })
+        // Some Discord versions call the generic RecyclerView binder, while
+        // others dispatch through a typed onConfigure(int, UserRowModel) method.
+        // Discover the concrete row-model types from the provider's live model and
+        // hook their typed binders as well as the generic fallback.
+        val hookedTypedBinders = LinkedHashSet<Method>()
+        unhooks += getModel.hook(
+            before = { param ->
+                detailsMessageId = runCatching {
+                    messageIdGetter.invoke(param.thisObject)?.toString()
+                }.getOrNull()
+            },
+            after = { param ->
+                val model = param.result ?: param.thisObject
+                val selectedEmoji = findSelectedEmojiKey(model, emojiClass)
+                    ?: findSelectedEmojiKey(param.thisObject, emojiClass)
+                detailsEmojiPart = selectedEmoji
+                detailLogOnce(
+                    "selected-reaction",
+                    if (selectedEmoji == null) {
+                        "selected reaction emoji was not found in Manage Reactions model"
+                    } else {
+                        "selected reaction emoji resolved as $selectedEmoji"
+                    },
+                )
+                refreshUserRows()
+                val candidates = collectUserRowDataClasses(model)
+                detailLogOnce(
+                    "user-model-discovery",
+                    "Manage Reactions model exposed ${candidates.size} possible user-row model types",
+                )
 
+                for (type in candidates) {
+                    val configure = runCatching {
+                        dexFinder.findMethod {
+                            matcher {
+                                name("onConfigure")
+                                paramCount(2)
+                                paramTypes("int", type.name)
+                            }
+                        }
+                    }.getOrNull() ?: continue
+
+                    val shouldHook = synchronized(hookedTypedBinders) {
+                        hookedTypedBinders.add(configure)
+                    }
+                    if (!shouldHook) continue
+
+                    runCatching {
+                        configure.isAccessible = true
+                        unhooks += configure.hook(after = { rowParam ->
+                            val data = rowParam.args.getOrNull(1) ?: return@hook
+                            if (!type.isInstance(data)) return@hook
+                            bindUserRowFromHolder(rowParam.thisObject, data)
+                        })
+                        detailLogOnce(
+                            "typed-user-binder-${type.name}",
+                            "hooked typed reaction-user binder for ${type.name}",
+                        )
+                    }.onFailure {
+                        XposedBridge.log(
+                            "Reaction Logs: could not hook typed user-row binder ${type.name}: $it",
+                        )
+                    }
+                }
+            },
+        )
+
+        // Keep a generic fallback for app versions that route through the base holder.
         val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
-        val configure = holderBase.declaredMethods.firstOrNull {
-            it.name == "onConfigure" &&
-                it.parameterCount == 2 &&
-                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                it.parameterTypes[1] == Any::class.java
-        } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
-        configure.isAccessible = true
-
-        unhooks += configure.hook(after = { param ->
-            val messageId = detailsMessageId ?: return@hook
-            val holder = param.thisObject
-            val data = param.args.getOrNull(1) ?: return@hook
-            val holderName = holder.javaClass.name
-            val dataName = data.javaClass.name
-
-            // Do not touch unrelated RecyclerViews. Manage Reactions has a dedicated
-            // holder family; the data-class check is a fallback for renamed holders.
-            if (
-                !holderName.contains("ManageReactions", ignoreCase = true) &&
-                !dataName.contains("User", ignoreCase = true) &&
-                !dataName.contains("Member", ignoreCase = true)
-            ) {
-                return@hook
+        val genericConfigure = generateSequence(holderBase) { it.superclass }
+            .flatMap { it.declaredMethods.asSequence() }
+            .firstOrNull {
+                it.name == "onConfigure" &&
+                    it.parameterCount == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == Any::class.java
             }
 
-            val itemView = holderItemView(holder) ?: return@hook
-            val userId = extractUserId(data)
-            if (userId == null) {
-                XposedBridge.log("Reaction Logs: could not read user ID from reaction-detail row $dataName")
-                return@hook
+        if (genericConfigure != null) {
+            runCatching {
+                genericConfigure.isAccessible = true
+                unhooks += genericConfigure.hook(after = { param ->
+                    val messageId = detailsMessageId ?: return@hook
+                    val holder = param.thisObject
+                    val data = param.args.getOrNull(1) ?: return@hook
+                    val dataName = data.javaClass.name
+                    val userId = extractUserId(data) ?: return@hook
+                    val isUserRow =
+                        holder.javaClass.name.contains("ManageReactions", ignoreCase = true) ||
+                        dataName.contains("User", ignoreCase = true) ||
+                        dataName.contains("Member", ignoreCase = true)
+                    if (!isUserRow) return@hook
+                    val itemView = holderItemView(holder) ?: return@hook
+                    detailLogOnce(
+                        "generic-user-row-bound",
+                        "generic reaction-user binder matched ${dataName.substringAfterLast('.')} for user $userId",
+                    )
+                    bindUserRow(itemView, messageId, userId)
+                })
+            }.onFailure {
+                XposedBridge.log("Reaction Logs: generic user-row binder unavailable: $it")
             }
+        }
 
-            bindUserRow(itemView, messageId, userId)
-        })
-
-        XposedBridge.log("Reaction Logs: reaction-user row hook installed")
+        detailLogOnce("user-hook-installed", "reaction-user row hooks installed")
     }
 
-    /**
-     * Read the selected emoji from the reaction-details model/provider when the
-     * current Discord build exposes it. This keeps a removed user highlighted
-     * only in the matching emoji's user list.
-     */
-    private fun selectedEmojiKey(value: Any?, depth: Int = 0): String? {
-        if (value == null || depth > 3) return null
-        val type = value.javaClass
-        if (type.name.contains("emoji", ignoreCase = true)) {
-            emojiKey(value)?.let { return it }
-        }
-
-        val getterNames = setOf(
-            "getEmoji", "getSelectedEmoji", "getReactionEmoji",
-            "getSelectedReaction", "getReaction",
-        )
-        for (getter in type.methods) {
-            if (getter.parameterCount != 0 || getter.name !in getterNames) continue
-            val nested = runCatching { getter.invoke(value) }.getOrNull() ?: continue
-            if (nested === value) continue
-            if (nested is String && nested.isNotBlank() && nested != "null") return nested
-            selectedEmojiKey(nested, depth + 1)?.let { return it }
-        }
-
+    private fun instanceFields(type: Class<*>): List<Field> {
+        val fields = mutableListOf<Field>()
         var current: Class<*>? = type
-        while (current != null) {
-            for (field in current.declaredFields) {
-                if (Modifier.isStatic(field.modifiers)) continue
-                val name = field.name.lowercase()
-                if (!name.contains("emoji") && name !in setOf("reaction", "selectedreaction")) continue
+        while (current != null && current != Any::class.java) {
+            fields += current.declaredFields.filterNot { Modifier.isStatic(it.modifiers) }
+            current = current.superclass
+        }
+        return fields
+    }
+
+    private fun findSelectedEmojiKey(root: Any?, emojiClass: Class<*>): String? {
+        val visited = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<Any, Boolean>(),
+        )
+
+        fun visit(value: Any?, depth: Int): String? {
+            if (value == null || depth > 4 || !visited.add(value)) return null
+            if (emojiClass.isInstance(value)) return emojiKey(value)
+
+            val type = value.javaClass
+            if (
+                type.isPrimitive || type.isEnum || value is String ||
+                type.name.startsWith("android.") || type.name.startsWith("java.")
+            ) return null
+
+            val getterNames = setOf(
+                "getSelectedReaction",
+                "getReaction",
+                "getSelectedEmoji",
+                "getEmoji",
+            )
+            val getters = type.methods
+                .filter { it.parameterCount == 0 && it.name in getterNames }
+                .sortedBy {
+                    when (it.name) {
+                        "getSelectedReaction" -> 0
+                        "getReaction" -> 1
+                        "getSelectedEmoji" -> 2
+                        else -> 3
+                    }
+                }
+            for (getter in getters) {
+                val nested = runCatching { getter.invoke(value) }.getOrNull()
+                visit(nested, depth + 1)?.let { return it }
+            }
+
+            val fields = instanceFields(type)
+                .filter { field ->
+                    val name = field.name.lowercase()
+                    name.contains("selected") || name == "reaction" ||
+                        name.contains("reaction") || name == "emoji" ||
+                        name.contains("emoji")
+                }
+                .sortedBy {
+                    val name = it.name.lowercase()
+                    when {
+                        name.contains("selected") && name.contains("reaction") -> 0
+                        name.contains("selected") && name.contains("emoji") -> 1
+                        name == "reaction" -> 2
+                        name.contains("reaction") -> 3
+                        else -> 4
+                    }
+                }
+
+            for (field in fields) {
                 val nested = runCatching {
                     field.isAccessible = true
                     field.get(value)
                 }.getOrNull() ?: continue
-                if (nested === value) continue
-                if (nested is String && nested.isNotBlank() && nested != "null") return nested
-                selectedEmojiKey(nested, depth + 1)?.let { return it }
+                if (nested is Iterable<*> || nested is Map<*, *> || nested is Array<*>) {
+                    if (!field.name.contains("selected", ignoreCase = true)) continue
+                }
+                visit(nested, depth + 1)?.let { return it }
             }
-            current = current.superclass
+            return null
         }
-        return null
+
+        return visit(root, 0)
+    }
+
+    private fun collectUserRowDataClasses(root: Any?): LinkedHashSet<Class<*>> {
+        val found = LinkedHashSet<Class<*>>()
+        val visited = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<Any, Boolean>(),
+        )
+
+        fun visit(value: Any?, depth: Int) {
+            if (value == null || depth > 4 || !visited.add(value)) return
+
+            when (value) {
+                is Iterable<*> -> {
+                    value.take(100).forEach { visit(it, depth + 1) }
+                    return
+                }
+                is Map<*, *> -> {
+                    value.values.take(100).forEach { visit(it, depth + 1) }
+                    return
+                }
+                is Array<*> -> {
+                    value.take(100).forEach { visit(it, depth + 1) }
+                    return
+                }
+            }
+
+            val type = value.javaClass
+            if (type.isPrimitive || type.isEnum || type == String::class.java) return
+
+            val lowerName = type.name.lowercase()
+            val hasUserIdAccessor = type.methods.any {
+                it.parameterCount == 0 && it.name in setOf("getUserId", "getUserID")
+            }
+            val hasUserField = instanceFields(type).any {
+                val name = it.name.lowercase()
+                name == "userid" || name == "memberid" ||
+                    name == "user" || name == "member"
+            }
+            if (
+                lowerName.contains("user") || lowerName.contains("member") ||
+                hasUserIdAccessor || hasUserField
+            ) {
+                found.add(type)
+            }
+
+            if (depth == 4) return
+            for (field in instanceFields(type).take(40)) {
+                val fieldName = field.name.lowercase()
+                val fieldType = field.type
+                if (
+                    fieldType.isPrimitive || fieldType.isEnum ||
+                    fieldType == String::class.java || fieldType.name.startsWith("android.")
+                ) {
+                    continue
+                }
+                val nested = runCatching {
+                    field.isAccessible = true
+                    field.get(value)
+                }.getOrNull() ?: continue
+                val collectionLike =
+                    nested is Iterable<*> || nested is Map<*, *> || nested is Array<*>
+                if (
+                    collectionLike || fieldName.contains("user") ||
+                    fieldName.contains("member") || fieldName.contains("reaction") ||
+                    fieldName.contains("item") || fieldName.contains("data")
+                ) {
+                    visit(nested, depth + 1)
+                }
+            }
+        }
+
+        visit(root, 0)
+        return found
+    }
+
+    private fun bindUserRowFromHolder(holder: Any, data: Any) {
+        val messageId = detailsMessageId ?: return
+        val userId = extractUserId(data) ?: return
+        val itemView = holderItemView(holder) ?: return
+        bindUserRow(itemView, messageId, userId)
+    }
+
+    private fun detailLogOnce(key: String, message: String) {
+        val shouldLog = synchronized(detailLogKeys) { detailLogKeys.add(key) }
+        if (shouldLog) XposedBridge.log("Reaction Logs: $message")
     }
 
     private fun bindUserRow(view: View, messageId: String, userId: String) {
