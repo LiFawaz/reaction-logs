@@ -2,10 +2,14 @@ package me.lifawaz.valenced.reactionlogs
 
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextSwitcher
 import android.widget.TextView
@@ -48,7 +52,9 @@ internal class ReactionLogHooks(
     private val userRows = WeakHashMap<View, UserRowBinding>()
     private val originalUserTextColors = WeakHashMap<TextView, ColorStateList>()
     private val originalUserRowTints = WeakHashMap<View, ColorStateList?>()
+    private val originalAvatarForegrounds = WeakHashMap<View, Drawable?>()
     @Volatile private var detailsMessageId: String? = null
+    @Volatile private var detailsEmojiKey: String? = null
     private val bindingMessageId = ThreadLocal<String?>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val unhooks = mutableListOf<XC_MethodHook.Unhook>()
@@ -137,6 +143,7 @@ internal class ReactionLogHooks(
             retainedPillViews.values.toList().also { retainedPillViews.clear() }
         }
         detailsMessageId = null
+        detailsEmojiKey = null
         mainHandler.post {
             retained.forEach { view ->
                 (view.parent as? ViewGroup)?.removeView(view)
@@ -154,23 +161,27 @@ internal class ReactionLogHooks(
             userRows.clear()
             originalUserTextColors.clear()
             originalUserRowTints.clear()
+            originalAvatarForegrounds.clear()
         }
     }
 
     private fun isRemoved(key: String): Boolean =
         synchronized(removedUsersByKey) { key in removedUsersByKey }
 
-    private fun removedUsersForMessage(messageId: String): Set<String> =
+    private fun removedUsersForMessage(messageId: String, emojiKey: String?): Set<String> =
         synchronized(removedUsersByKey) {
             removedUsersByKey.entries
                 .asSequence()
-                .filter { it.key.startsWith("$messageId|") }
+                .filter { (key, _) ->
+                    key.startsWith("$messageId|") &&
+                        (emojiKey.isNullOrBlank() || key.startsWith("$messageId|$emojiKey|"))
+                }
                 .flatMap { it.value.asSequence() }
                 .toSet()
         }
 
     private fun isRemovedUser(messageId: String, userId: String): Boolean =
-        userId in removedUsersForMessage(messageId)
+        userId in removedUsersForMessage(messageId, detailsEmojiKey)
 
     /**
      * Keep removed reaction pills visible by retaining and reattaching their real
@@ -329,10 +340,12 @@ internal class ReactionLogHooks(
             it.name == "get" && it.parameterCount == 0
         } ?: error("ManageReactionsModelProvider.get not found")
 
-        unhooks += getModel.hook(before = { param ->
+        unhooks += getModel.hook(after = { param ->
             detailsMessageId = runCatching {
                 messageIdGetter.invoke(param.thisObject)?.toString()
             }.getOrNull()
+            detailsEmojiKey = selectedEmojiKey(param.result)
+                ?: selectedEmojiKey(param.thisObject)
         })
 
         val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
@@ -374,6 +387,49 @@ internal class ReactionLogHooks(
         XposedBridge.log("Reaction Logs: reaction-user row hook installed")
     }
 
+    /**
+     * Read the selected emoji from the reaction-details model/provider when the
+     * current Discord build exposes it. This keeps a removed user highlighted
+     * only in the matching emoji's user list.
+     */
+    private fun selectedEmojiKey(value: Any?, depth: Int = 0): String? {
+        if (value == null || depth > 3) return null
+        val type = value.javaClass
+        if (type.name.contains("emoji", ignoreCase = true)) {
+            emojiKey(value)?.let { return it }
+        }
+
+        val getterNames = setOf(
+            "getEmoji", "getSelectedEmoji", "getReactionEmoji",
+            "getSelectedReaction", "getReaction",
+        )
+        for (getter in type.methods) {
+            if (getter.parameterCount != 0 || getter.name !in getterNames) continue
+            val nested = runCatching { getter.invoke(value) }.getOrNull() ?: continue
+            if (nested === value) continue
+            if (nested is String && nested.isNotBlank() && nested != "null") return nested
+            selectedEmojiKey(nested, depth + 1)?.let { return it }
+        }
+
+        var current: Class<*>? = type
+        while (current != null) {
+            for (field in current.declaredFields) {
+                if (Modifier.isStatic(field.modifiers)) continue
+                val name = field.name.lowercase()
+                if (!name.contains("emoji") && name !in setOf("reaction", "selectedreaction")) continue
+                val nested = runCatching {
+                    field.isAccessible = true
+                    field.get(value)
+                }.getOrNull() ?: continue
+                if (nested === value) continue
+                if (nested is String && nested.isNotBlank() && nested != "null") return nested
+                selectedEmojiKey(nested, depth + 1)?.let { return it }
+            }
+            current = current.superclass
+        }
+        return null
+    }
+
     private fun bindUserRow(view: View, messageId: String, userId: String) {
         userRows[view] = UserRowBinding(messageId, userId)
         mainHandler.post {
@@ -410,6 +466,45 @@ internal class ReactionLogHooks(
                 child.setTextColor(originalUserTextColors.remove(child))
             }
         }
+        applyAvatarStyle(view, highlighted)
+    }
+
+    private fun applyAvatarStyle(row: View, highlighted: Boolean) {
+        if (highlighted) {
+            var avatar: View? = null
+            visitViews(row) { child ->
+                if (avatar == null && child !== row && isAvatarView(child)) avatar = child
+            }
+            val target = avatar ?: return
+            if (!originalAvatarForegrounds.containsKey(target)) {
+                val original = target.foreground
+                originalAvatarForegrounds[target] = original
+                val stroke = (2f * target.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+                val ring = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.TRANSPARENT)
+                    setStroke(stroke, REMOVED_RED)
+                }
+                target.foreground = if (original == null) ring else LayerDrawable(arrayOf(original, ring))
+            }
+            return
+        }
+
+        visitViews(row) { child ->
+            if (originalAvatarForegrounds.containsKey(child)) {
+                child.foreground = originalAvatarForegrounds.remove(child)
+            }
+        }
+    }
+
+    private fun isAvatarView(view: View): Boolean {
+        val className = view.javaClass.name.lowercase()
+        if (className.contains("avatar") || className.contains("drawee")) return true
+        if (view !is ImageView) return false
+        val minSize = (20f * view.resources.displayMetrics.density).toInt()
+        val width = if (view.width > 0) view.width else view.layoutParams?.width ?: 0
+        val height = if (view.height > 0) view.height else view.layoutParams?.height ?: 0
+        return (width <= 0 || width >= minSize) && (height <= 0 || height >= minSize)
     }
 
     private fun visitViews(view: View, action: (View) -> Unit) {
