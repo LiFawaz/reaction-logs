@@ -2,10 +2,13 @@ package me.lifawaz.valenced.reactionlogs
 
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.PorterDuff
 import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextSwitcher
 import android.widget.TextView
@@ -47,6 +50,7 @@ internal class ReactionLogHooks(
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
     private val originalUserTextColors = WeakHashMap<TextView, ColorStateList>()
+    private val originalAvatarFilters = WeakHashMap<ImageView, ColorFilter?>()
     private val originalUserRowTints = WeakHashMap<View, ColorStateList?>()
     @Volatile private var detailsMessageId: String? = null
     private val bindingMessageId = ThreadLocal<String?>()
@@ -153,6 +157,7 @@ internal class ReactionLogHooks(
             originalPillStyles.clear()
             userRows.clear()
             originalUserTextColors.clear()
+            originalAvatarFilters.clear()
             originalUserRowTints.clear()
         }
     }
@@ -399,15 +404,43 @@ internal class ReactionLogHooks(
             view.backgroundTintList = originalUserRowTints.remove(view)
         }
 
+        // The first image in a Manage Reactions user row is the account avatar.
+        // Tint it red as well as the username so the affected profile is obvious.
+        var avatarFound = false
         visitViews(view) { child ->
-            if (child !is TextView) return@visitViews
-            if (highlighted) {
-                if (!originalUserTextColors.containsKey(child)) {
-                    originalUserTextColors[child] = child.textColors
+            when (child) {
+                is ImageView -> {
+                    if (!avatarFound) {
+                        avatarFound = true
+                        if (highlighted) {
+                            if (!originalAvatarFilters.containsKey(child)) {
+                                originalAvatarFilters[child] = child.colorFilter
+                            }
+                            child.setColorFilter(REMOVED_RED, PorterDuff.Mode.SRC_ATOP)
+                        } else if (originalAvatarFilters.containsKey(child)) {
+                            child.colorFilter = originalAvatarFilters.remove(child)
+                        }
+                    }
                 }
-                child.setTextColor(REMOVED_RED)
-            } else if (originalUserTextColors.containsKey(child)) {
-                child.setTextColor(originalUserTextColors.remove(child))
+                is TextView -> {
+                    if (highlighted) {
+                        if (!originalUserTextColors.containsKey(child)) {
+                            originalUserTextColors[child] = child.textColors
+                        }
+                        child.setTextColor(REMOVED_RED)
+                    } else if (originalUserTextColors.containsKey(child)) {
+                        child.setTextColor(originalUserTextColors.remove(child))
+                    }
+                }
+            }
+        }
+
+        if (!highlighted) {
+            // Restore any tracked avatar even if the row's child order changed.
+            visitViews(view) { child ->
+                if (child is ImageView && originalAvatarFilters.containsKey(child)) {
+                    child.colorFilter = originalAvatarFilters.remove(child)
+                }
             }
         }
     }
