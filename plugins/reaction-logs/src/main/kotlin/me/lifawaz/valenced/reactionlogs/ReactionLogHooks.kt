@@ -362,7 +362,7 @@ internal class ReactionLogHooks(
                 val model = param.result ?: param.thisObject
                 val selectedEmoji = findSelectedEmojiKey(model, emojiClass)
                     ?: findSelectedEmojiKey(param.thisObject, emojiClass)
-                detailsEmojiPart = selectedEmoji
+                detailsEmojiKey = selectedEmoji
                 detailLogOnce(
                     "selected-reaction",
                     if (selectedEmoji == null) {
