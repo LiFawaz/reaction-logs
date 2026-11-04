@@ -186,6 +186,21 @@ describe('Reaction Logs event state', () => {
         })
     })
 
+    test('legacy removal records survive later state updates without a channel ID', () => {
+        let migrated = normalizeReactionStorage({
+            activeRemovals: [
+                { pillKey: 'message-1|heart:123456789|0', removedUsers: ['user-1'] },
+            ],
+        }, 100)
+        migrated = normalizeReactionStorage(migrated, 200)
+        expect(migrated.removalHistory).toHaveLength(1)
+
+        const snapshot = buildNativeSnapshot(migrated, 200)
+        expect(snapshot.activeRemovals).toEqual([
+            { pillKey: 'message-1|custom:123456789|0', removedUsers: [{ id: 'user-1' }] },
+        ])
+    })
+
     test('history expires after retention and stays bounded', () => {
         const old = applyReactionRemove(state(), base(), 1)
         expect(normalizeReactionStorage(old, 1 + 30 * 24 * 60 * 60 * 1000 + 1).removalHistory).toHaveLength(0)
