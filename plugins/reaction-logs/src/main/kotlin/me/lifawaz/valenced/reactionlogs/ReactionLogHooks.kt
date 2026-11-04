@@ -70,11 +70,11 @@ internal class ReactionLogHooks(
             XposedBridge.log("Reaction Logs: reaction-user row hook unavailable: $it")
         }
         runCatching { hookReactionDetails(dexFinder) }.onFailure {
-            XposedBridge.log("Reaction Logs: reaction-details timestamp hook unavailable: $it")
+            XposedBridge.log("Reaction Logs: reaction-details hook unavailable: $it")
         }
     }
 
-    /** Updates only per-user removal records and timestamps. */
+    /** Updates only per-user removal records. */
     fun setRemovalLogs(json: String) {
         val parsed = LinkedHashMap<String, Set<String>>()
         val array = JSONArray(json)
