@@ -200,13 +200,36 @@ describe('Reaction Logs event state', () => {
         expect(current.removalHistory).toHaveLength(1000)
     })
     test('active reaction cache and epoch map stay bounded', () => {
-        let current = state()
-        for (let index = 0; index < MAX_ACTIVE_REACTIONS + 10; index++) {
-            current = applyReactionAdd(current, base({
-                message_id: `active-message-${index}`,
-                user_id: `active-user-${index}`,
-            }), 1000 + index)
-        }
+        const activeReactions = Array.from(
+            { length: MAX_ACTIVE_REACTIONS + 10 },
+            (_, index) => ({
+                guildId: 'guild-1',
+                channelId: 'channel-1',
+                messageId: `active-message-${index}`,
+                userId: `active-user-${index}`,
+                emojiId: null,
+                emojiName: 'heart',
+                emojiKey: 'unicode:heart',
+                reactionType: 0,
+            }),
+        )
+        const epochs = Object.fromEntries(activeReactions.map((item, index) => [
+            JSON.stringify([
+                item.guildId,
+                item.channelId,
+                item.messageId,
+                item.emojiKey,
+                item.reactionType,
+                item.userId,
+            ]),
+            index + 1,
+        ]))
+        const current = normalizeReactionStorage({
+            ...state(),
+            activeReactions,
+            epochs,
+        }, 10_000)
+
         expect(current.activeReactions).toHaveLength(MAX_ACTIVE_REACTIONS)
         expect(Object.keys(current.epochs)).toHaveLength(MAX_ACTIVE_REACTIONS)
     })
