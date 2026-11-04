@@ -336,6 +336,28 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             syncNative()
         }
 
+        const clearDeletedMessages = (messageIds: string[]) => {
+            const deleted = new Set(messageIds.filter(Boolean))
+            if (!deleted.size) return
+            const oldRemovalCount = removals.length
+            const oldBulkCount = bulkEvents.length
+            removals.splice(0, removals.length, ...removals.filter(item => !deleted.has(item.messageId)))
+            bulkEvents.splice(0, bulkEvents.length, ...bulkEvents.filter(
+                item => !item.messageId || !deleted.has(item.messageId),
+            ))
+            let stateChanged = false
+            for (const [key, state] of states) {
+                if (deleted.has(state.messageId)) {
+                    states.delete(key)
+                    stateChanged = true
+                }
+            }
+            if (oldRemovalCount !== removals.length || oldBulkCount !== bulkEvents.length || stateChanged) {
+                persistState()
+                syncNative()
+            }
+        }
+
         cleanup(
             onFluxEventDispatched<ReactionPayload>('MESSAGE_REACTION_REMOVE', payload => {
                 try {
@@ -371,6 +393,17 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 } catch (error) {
                     plugin.reportError('Failed to process MESSAGE_REACTION_REMOVE_EMOJI: ' + String(error))
                 }
+                return payload
+            }),
+
+            onFluxEventDispatched<ReactionPayload>('MESSAGE_DELETE', payload => {
+                const messageId = asString(payload.id, payload.messageId, payload.message_id)
+                if (messageId) clearDeletedMessages([messageId])
+                return payload
+            }),
+
+            onFluxEventDispatched<ReactionPayload>('MESSAGE_DELETE_BULK', payload => {
+                clearDeletedMessages(payload.ids ?? [])
                 return payload
             }),
 
