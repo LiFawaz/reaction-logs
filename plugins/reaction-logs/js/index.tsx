@@ -217,9 +217,9 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         ) => {
             const key = stateKey(identity.reactionKey, userId)
             const existing = states.get(key)
-            // Suppress the optimistic/gateway echo pair, but not future legitimate
-            // removals after a re-add event was missed while the plugin was unloaded.
-            // A matching ADD always resets the state and lets the next REMOVE through.
+            // Suppress the optimistic/gateway echo pair inside a short five-second window,
+            // but allow a later REMOVE to form a new history entry if an ADD was missed while
+            // the plugin was unloaded. A received matching ADD resets the state immediately.
             if (existing?.state === 'removed' && timestamp - existing.updatedAt < 5000) {
                 return false
             }
