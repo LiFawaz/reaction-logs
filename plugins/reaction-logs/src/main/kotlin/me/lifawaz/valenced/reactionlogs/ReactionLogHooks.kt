@@ -314,7 +314,7 @@ internal class ReactionLogHooks(
             it.name == "copy" && it.parameterCount == 3
         }
         if (copy != null) {
-            runCatching { copy.invoke(original, 0, emoji, false) }.getOrNull()?.let { return it }
+            runCatching { copy.invoke(original, 0, emoji, 0) }.getOrNull()?.let { return it }
         }
 
         val constructor = original.javaClass.declaredConstructors.firstOrNull { candidate ->
@@ -322,7 +322,7 @@ internal class ReactionLogHooks(
             types.size == 3 &&
                 (types[0] == Int::class.javaPrimitiveType || types[0] == Int::class.java) &&
                 types[1].isInstance(emoji) &&
-                (types[2] == Boolean::class.javaPrimitiveType || types[2] == Boolean::class.java)
+                (types[2] == Int::class.javaPrimitiveType || types[2] == Int::class.java)
         } ?: return null
         return runCatching {
             constructor.isAccessible = true
