@@ -1,12 +1,19 @@
-export interface ActiveRemovalEntry {
+export interface RemovedUserEntry {
+    id: string
+}
+
+export interface RemovalLogEntry {
     pillKey: string
-    removedUsers: string[]
+    removedUsers: RemovedUserEntry[]
 }
 
 export interface ReactionStorage {
-    activeRemovals: ActiveRemovalEntry[]
+    sessionId?: string
+    removalLogs?: RemovalLogEntry[]
+    retainedPillKeys?: string[]
 }
 
 export const DefaultStorage: ReactionStorage = {
-    activeRemovals: [],
+    removalLogs: [],
+    retainedPillKeys: [],
 }
