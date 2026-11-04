@@ -422,21 +422,34 @@ internal class ReactionLogHooks(
      * existing Discord model. Constructing Discord's own ReactionUserItem keeps
      * its real User, avatar, display name and profile-click behavior.
      */
-    private fun augmentReactionPopup(widget: Any, model: Any, loader: ClassLoader): Any {
-        val provider = readMember(widget, "modelProvider") ?: return model
-        val channelId = readMember(provider, "channelId")?.toString() ?: return model
-        val messageId = readMember(provider, "messageId")?.toString() ?: return model
+    private fun clearPopupSelection(model: Any): Any {
+        detailsGuildId = null
+        detailsChannelId = null
+        detailsMessageId = null
+        detailsEmojiKey = null
+        detailsReactionType = 0
+        synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
+        cancelPopupRetry()
+        popupRetryKey = null
+        refreshUserRows()
+        return model
+    }
 
-        val reactionItems = readMember(model, "reactionItems") as? List<*> ?: return model
+    private fun augmentReactionPopup(widget: Any, model: Any, loader: ClassLoader): Any {
+        val provider = readMember(widget, "modelProvider") ?: return clearPopupSelection(model)
+        val channelId = readMember(provider, "channelId")?.toString() ?: return clearPopupSelection(model)
+        val messageId = readMember(provider, "messageId")?.toString() ?: return clearPopupSelection(model)
+
+        val reactionItems = readMember(model, "reactionItems") as? List<*> ?: return clearPopupSelection(model)
         val selectedItem = reactionItems.firstOrNull {
             readMember(it, "isSelected") == true
-        } ?: return model
-        val selectedReaction = readMember(selectedItem, "reaction") ?: return model
-        val emoji = readMember(selectedReaction, "emoji") ?: return model
-        val selectedEmojiKey = emojiKey(emoji) ?: return model
+        } ?: return clearPopupSelection(model)
+        val selectedReaction = readMember(selectedItem, "reaction") ?: return clearPopupSelection(model)
+        val emoji = readMember(selectedReaction, "emoji") ?: return clearPopupSelection(model)
+        val selectedEmojiKey = emojiKey(emoji) ?: return clearPopupSelection(model)
         val selectedReactionType = reactionType(selectedReaction)
-        val channelLong = channelId.toLongOrNull() ?: return model
-        val messageLong = messageId.toLongOrNull() ?: return model
+        val channelLong = channelId.toLongOrNull() ?: return clearPopupSelection(model)
+        val messageLong = messageId.toLongOrNull() ?: return clearPopupSelection(model)
         val guildId = resolveGuildId(loader, channelLong)
 
         detailsGuildId = guildId
@@ -445,7 +458,7 @@ internal class ReactionLogHooks(
         detailsEmojiKey = selectedEmojiKey
         detailsReactionType = selectedReactionType
 
-        val originalItems = readMember(model, "userItems") as? List<*> ?: return model
+        val originalItems = readMember(model, "userItems") as? List<*> ?: return clearPopupSelection(model)
 
         val activeForSelection = synchronized(activeReactions) {
             activeReactions.filter { active ->
