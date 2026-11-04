@@ -3,8 +3,8 @@
   "id": "lifawaz.reaction-logs",
   "name": "Reaction Logs",
   "author": "Li Fawaz",
-  "description": "Logs removed reactors during the current app session, keeps removed reaction pills red, and highlights the removed user's profile in reaction details.",
-  "version": "1.3.3",
+  "description": "Logs removed reactors for the current app session, keeps removed reaction pills red, and highlights the removed user's profile in reaction details.",
+  "version": "1.3.4",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
