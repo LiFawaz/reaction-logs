@@ -29,6 +29,10 @@ interface ReactionPayload {
 
 type RemovedUsers = Set<string>
 
+// A new token is created when Discord's JS process starts. It lets plugin restarts
+// preserve this session's logs while a full app restart starts with a clean slate.
+const SESSION_ID = Math.random().toString(36).slice(2)
+
 const keyFor = (messageId: string, emojiKey: string, reactionType: number) =>
     messageId + '|' + emojiKey + '|' + reactionType
 
@@ -59,9 +63,26 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         const removalLogs = new Map<string, RemovedUsers>()
         const retainedPillKeys = new Set<string>()
 
-        // Session-only state: do not restore previous runs after a full app restart.
-        // Events are persisted while this process is alive, but the next app start
-        // begins with an empty log.
+        // Restore only when this plugin is restarted inside the same app process.
+        // A full app restart creates a new SESSION_ID and therefore clears old logs.
+        const cached = jsonStorage.cache ?? DefaultStorage
+        if (cached.sessionId === SESSION_ID) {
+            for (const entry of cached.removalLogs ?? []) {
+                if (!entry.pillKey) continue
+                const users = new Set(
+                    (entry.removedUsers ?? [])
+                        .map(user => String(user.id ?? '').trim())
+                        .filter(Boolean),
+                )
+                if (users.size) {
+                    removalLogs.set(entry.pillKey, users)
+                    retainedPillKeys.add(entry.pillKey)
+                }
+            }
+            for (const key of cached.retainedPillKeys ?? []) {
+                if (typeof key === 'string' && key) retainedPillKeys.add(key)
+            }
+        }
         let persistQueue = Promise.resolve()
         const pendingRemovalEchoes = new Set<string>()
         const pendingAddEchoes = new Set<string>()
@@ -112,6 +133,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
         const persistState = () => {
             const snapshot: ReactionStorage = {
+                sessionId: SESSION_ID,
                 removalLogs: [...removalLogs].map(([pillKey, users]) => ({
                     pillKey,
                     removedUsers: [...users].map(id => ({ id })),
@@ -303,8 +325,8 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             ),
 
             () => {
-                removalLogs.clear()
-                retainedPillKeys.clear()
+                // Stop rendering native highlights, but keep the session log in
+                // storage so toggling the plugin off and back on does not erase it.
                 pendingRemovalEchoes.clear()
                 pendingAddEchoes.clear()
                 persistState()
