@@ -26,7 +26,6 @@ interface ReactionPayload {
     emoji?: Emoji
     reactionType?: number
     reaction_type?: number
-    type?: number
     burst?: boolean
     guildId?: string
     guild_id?: string
@@ -177,7 +176,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             const emojiName = asString(emoji.name)
             if (!emojiId && !emojiName) return null
             const emojiKey = emojiId ? 'id:' + emojiId : 'unicode:' + emojiName
-            const rawType = payload.reactionType ?? payload.reaction_type ?? payload.type
+            const rawType = payload.reactionType ?? payload.reaction_type
             const reactionType = Number(rawType) === 1 || payload.burst === true ? 1 : 0
 
             return {
