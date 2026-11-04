@@ -204,6 +204,18 @@ internal class ReactionLogHooks(
                 applyPillStyle(pill, isRemoved(key))
             }
             refreshUserRows()
+            refreshPopupModel()
+        }
+    }
+
+    private fun refreshPopupModel() {
+        val widget = lastPopupWidget?.get() ?: return
+        val model = lastPopupModel ?: return
+        val method = configurePopupMethod ?: return
+        runCatching {
+            method.invoke(widget, model)
+        }.onFailure {
+            XposedBridge.log("Reaction Logs: could not refresh the open reaction popup: $it")
         }
     }
 
@@ -522,6 +534,22 @@ internal class ReactionLogHooks(
         }
 
         val currentActiveIds = activeForSelection.mapTo(LinkedHashSet()) { it.userId }
+        val historyUserIds = historyForSelection
+            .mapTo(LinkedHashSet()) { it.userId }
+            .filterTo(LinkedHashSet()) { it !in currentActiveIds }
+
+        // A stale model can briefly still contain a just-removed reactor while
+        // Discord's store emission is in flight. Remove that exact row and append
+        // it again in the removed section so it receives the red state.
+        val filteredItems = originalItems.filterNot { row ->
+            row != null &&
+                row.javaClass.name.contains("ReactionUserItem", ignoreCase = true) &&
+                extractUserId(row) in historyUserIds
+        }
+        val existingUsers = filteredItems.mapNotNull(::extractUserId).toMutableSet()
+        val output = ArrayList<Any>(filteredItems.size + 8)
+        filteredItems.filterNotNullTo(output)
+
         for (active in activeForSelection) {
             if (!existingUsers.add(active.userId)) continue
             val user = resolveUser(loader, active.userId) ?: continue
@@ -549,7 +577,7 @@ internal class ReactionLogHooks(
         }
         refreshUserRows()
 
-        if (output.size == originalItems.size) return model
+        if (output == originalItems) return model
         val copy = model.javaClass.methods.firstOrNull {
             it.name == "copy" && it.parameterCount == 2
         }
