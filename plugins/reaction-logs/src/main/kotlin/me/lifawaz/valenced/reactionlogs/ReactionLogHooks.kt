@@ -86,6 +86,9 @@ internal class ReactionLogHooks(
     private var lastPopupWidget: WeakReference<Any>? = null
     private var lastPopupModel: Any? = null
     private var configurePopupMethod: Method? = null
+    private var popupRetryKey: String? = null
+    private var popupRetryAttempts = 0
+    private var popupRetryRunnable: Runnable? = null
     private val boundPills = WeakHashMap<LinearLayout, String>()
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
@@ -238,6 +241,7 @@ internal class ReactionLogHooks(
         lastPopupWidget = null
         lastPopupModel = null
         configurePopupMethod = null
+        cancelPopupRetry()
         synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
         mainHandler.post {
             for (pill in boundPills.keys.toList()) {
@@ -460,6 +464,12 @@ internal class ReactionLogHooks(
                     (active.guildId.isNullOrBlank() || guildId.isNullOrBlank() || active.guildId == guildId)
             }.toList()
         }
+        val selectionRetryKey = userRowKey(channelId, messageId, selectedEmojiKey, selectedReactionType, "")
+        if (popupRetryKey != selectionRetryKey) {
+            cancelPopupRetry()
+            popupRetryKey = selectionRetryKey
+        }
+
         val historyForSelection = synchronized(removalHistory) {
             removalHistory.values.filter { entry ->
                 entry.messageId == messageId &&
@@ -485,6 +495,7 @@ internal class ReactionLogHooks(
         }
 
         val removedIds = LinkedHashSet<String>()
+        var unresolvedUsers = false
         for (entry in historyForSelection) {
             if (entry.userId in currentActiveIds) continue
             // Keep and mark an existing real Discord row when available. This also
@@ -494,10 +505,17 @@ internal class ReactionLogHooks(
                 removedIds.add(entry.userId)
                 continue
             }
-            val user = resolveUser(loader, entry.userId) ?: continue
+            val user = resolveUser(loader, entry.userId)
+            if (user == null) {
+                unresolvedUsers = true
+                continue
+            }
             val member = guildId?.let { resolveGuildMember(loader, it, entry.userId) }
             val row = createReactionUserItem(loader, user, channelLong, messageLong, emoji, member)
-                ?: continue
+            if (row == null) {
+                unresolvedUsers = true
+                continue
+            }
             output.add(row)
             existingUsers.add(entry.userId)
             removedIds.add(entry.userId)
@@ -510,6 +528,7 @@ internal class ReactionLogHooks(
             }
         }
         refreshUserRows()
+        if (unresolvedUsers) schedulePopupRetry(selectionRetryKey) else cancelPopupRetry()
 
         if (output == originalItems) return model
         val copy = model.javaClass.methods.firstOrNull {
@@ -620,7 +639,11 @@ internal class ReactionLogHooks(
     private fun bindUserRow(view: View, messageId: String, userId: String) {
         val channelId = detailsChannelId ?: return
         val emojiKey = detailsEmojiKey ?: return
+        if (detailsMessageId != messageId) return
         val reactionType = detailsReactionType
+        // RecyclerView reuses holders between emoji tabs; restore the previous row's
+        // original styling before assigning this holder a different reaction identity.
+        applyUserRowStyle(view, false)
         val binding = UserRowBinding(channelId, messageId, emojiKey, reactionType, userId)
         userRows[view] = binding
         mainHandler.post {
@@ -638,6 +661,28 @@ internal class ReactionLogHooks(
             val highlighted = synchronized(popupRemovedUsers) { key in popupRemovedUsers }
             applyUserRowStyle(view, highlighted)
         }
+    }
+
+    private fun schedulePopupRetry(key: String) {
+        if (popupRetryKey != key) {
+            cancelPopupRetry()
+            popupRetryKey = key
+        }
+        if (popupRetryAttempts >= 4 || popupRetryRunnable != null) return
+        val delay = 250L shl popupRetryAttempts
+        val retry = Runnable {
+            popupRetryRunnable = null
+            popupRetryAttempts++
+            refreshPopupModel()
+        }
+        popupRetryRunnable = retry
+        mainHandler.postDelayed(retry, delay)
+    }
+
+    private fun cancelPopupRetry() {
+        popupRetryRunnable?.let(mainHandler::removeCallbacks)
+        popupRetryRunnable = null
+        popupRetryAttempts = 0
     }
 
     private fun reactionType(reaction: Any): Int {
