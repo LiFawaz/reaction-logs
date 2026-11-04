@@ -118,6 +118,16 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 .slice(-MAX_BULK_EVENTS)
             removals.splice(0, removals.length, ...retainedRemovals)
             bulkEvents.splice(0, bulkEvents.length, ...retainedBulkEvents)
+            for (const [key, state] of states) {
+                if (state.updatedAt < cutoff) states.delete(key)
+            }
+            if (states.size > 20000) {
+                const newest = [...states.entries()]
+                    .sort((a, b) => a[1].updatedAt - b[1].updatedAt)
+                    .slice(-20000)
+                states.clear()
+                for (const [key, state] of newest) states.set(key, state)
+            }
 
             const snapshot: ReactionStorage = {
                 removals: [...removals],
@@ -208,7 +218,11 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         ) => {
             const key = stateKey(identity.reactionKey, userId)
             const existing = states.get(key)
-            if (existing?.state === 'removed') return false
+            // Gateway echoes may repeat an optimistic event. Do not dedupe forever:
+            // a removal after a missed ADD or a plugin restart must still be recorded.
+            if (existing?.state === 'removed' && timestamp - existing.updatedAt < 5000) {
+                return false
+            }
 
             const eventId = 'remove:' + key + ':' + timestamp + ':' + (++eventSequence)
             const record: RemovalRecord = {
@@ -305,7 +319,6 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             }
 
             const timestamp = Date.now()
-            let changed = false
             for (const state of [...states.values()]) {
                 if (state.messageId !== messageId || state.state !== 'active') continue
                 if (type === 'MESSAGE_REACTION_REMOVE_EMOJI' &&
@@ -326,13 +339,13 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                         ? state.emojiKey.slice('id:'.length)
                         : undefined,
                 }
-                changed = recordIndividualRemoval(
+                recordIndividualRemoval(
                     stateIdentity,
                     state.userId,
                     type === 'MESSAGE_REACTION_REMOVE_ALL' ? 'remove_all' : 'remove_emoji',
                     undefined,
                     timestamp,
-                ) || changed
+                )
             }
 
             addBulkEvent(type, identity, timestamp)
