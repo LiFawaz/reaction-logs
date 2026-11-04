@@ -91,6 +91,7 @@ internal class ReactionLogHooks(
     private var popupRetryKey: String? = null
     private var popupRetryAttempts = 0
     private var popupRetryRunnable: Runnable? = null
+    private val retainedPillViews = LinkedHashMap<String, LinearLayout>()
     private val boundPills = WeakHashMap<LinearLayout, String>()
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
@@ -182,6 +183,14 @@ internal class ReactionLogHooks(
             }
         }
 
+        val retainedPillKeys = parsedMarkers.keys.toMutableSet()
+        parsedActive.forEach { retainedPillKeys.add(reactionKey(it.messageId, it.emojiKey, it.reactionType)) }
+        val staleRetainedViews = synchronized(retainedPillViews) {
+            val stale = retainedPillViews.filterKeys { it !in retainedPillKeys }.values.toList()
+            retainedPillViews.keys.retainAll(retainedPillKeys)
+            stale
+        }
+
         synchronized(removedUsersByKey) {
             removedUsersByKey.clear()
             removedUsersByKey.putAll(parsedMarkers)
@@ -196,6 +205,11 @@ internal class ReactionLogHooks(
         }
 
         mainHandler.post {
+            staleRetainedViews.forEach { view ->
+                (view.parent as? ViewGroup)?.removeView(view)
+                boundPills.remove(view)
+                applyPillStyle(view, false)
+            }
             for ((pill, key) in boundPills.entries.toList()) {
                 applyPillStyle(pill, isRemoved(key))
             }
@@ -220,7 +234,15 @@ internal class ReactionLogHooks(
         synchronized(removalHistory) { removalHistory.clear() }
         synchronized(activeReactions) { activeReactions.clear() }
         synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
+        val retained = synchronized(retainedPillViews) {
+            retainedPillViews.values.toList().also { retainedPillViews.clear() }
+        }
         mainHandler.post {
+            retained.forEach { view ->
+                (view.parent as? ViewGroup)?.removeView(view)
+                boundPills.remove(view)
+                applyPillStyle(view, false)
+            }
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
             }
@@ -246,7 +268,15 @@ internal class ReactionLogHooks(
         configurePopupMethod = null
         cancelPopupRetry()
         synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
+        val retained = synchronized(retainedPillViews) {
+            retainedPillViews.values.toList().also { retainedPillViews.clear() }
+        }
         mainHandler.post {
+            retained.forEach { view ->
+                (view.parent as? ViewGroup)?.removeView(view)
+                boundPills.remove(view)
+                applyPillStyle(view, false)
+            }
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
             }
@@ -335,6 +365,17 @@ internal class ReactionLogHooks(
         )
 
         unhooks += setReactions.hook(
+            before = { param ->
+                val messageId = bindingMessageId.get() ?: return@hook
+                val flexbox = param.thisObject as? ViewGroup ?: return@hook
+                for (index in 0 until flexbox.childCount) {
+                    val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
+                    val key = boundPills[pillView] ?: continue
+                    if (key.startsWith("$messageId|") && isRemoved(key)) {
+                        synchronized(retainedPillViews) { retainedPillViews[key] = pillView }
+                    }
+                }
+            },
             after = { param ->
                 val flexbox = param.thisObject as ViewGroup
                 val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
@@ -361,6 +402,40 @@ internal class ReactionLogHooks(
                     val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
                     boundPills[pillView] = key
                     applyPillStyle(pillView, isRemoved(key))
+                }
+
+                if (messageId != null) {
+                    val prefix = "$messageId|"
+                    val retained = synchronized(retainedPillViews) {
+                        retainedPillViews.entries
+                            .filter { it.key.startsWith(prefix) }
+                            .map { it.key to it.value }
+                    }
+                    for ((key, view) in retained) {
+                        if (key in currentKeys) {
+                            synchronized(retainedPillViews) { retainedPillViews.remove(key) }
+                            if (view.parent !== flexbox) {
+                                (view.parent as? ViewGroup)?.removeView(view)
+                                boundPills.remove(view)
+                                applyPillStyle(view, false)
+                            }
+                        } else if (isRemoved(key)) {
+                            if (view.parent !== flexbox) {
+                                (view.parent as? ViewGroup)?.removeView(view)
+                                runCatching { flexbox.addView(view) }.onFailure {
+                                    XposedBridge.log("Reaction Logs: could not retain removed pill: $it")
+                                }
+                            }
+                            boundPills[view] = key
+                            setPillCountZero(view)
+                            applyPillStyle(view, true)
+                        } else {
+                            synchronized(retainedPillViews) { retainedPillViews.remove(key) }
+                            (view.parent as? ViewGroup)?.removeView(view)
+                            boundPills.remove(view)
+                            applyPillStyle(view, false)
+                        }
+                    }
                 }
             },
         )
@@ -827,6 +902,10 @@ internal class ReactionLogHooks(
             if (child is TextSwitcher) return child.currentView as? TextView
         }
         return null
+    }
+
+    private fun setPillCountZero(view: LinearLayout) {
+        countText(view)?.text = "0"
     }
 
     private fun pills(
