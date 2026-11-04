@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "name": "LiFawaz Reaction Logs TEST",
+  "description": "Isolated test feed. Not the production Reaction Logs repository.",
+  "plugins": {
+    "lifawaz.reaction-logs": {
+      "name": "Reaction Logs (TEST)",
+      "description": "Logs removed reactors during the current app session, keeps removed reaction pills red, and highlights the removed user's profile in reaction details.",
+      "author": "Li Fawaz",
+      "channels": {
+        "latest": "1.3.3"
+      },
+      "versions": {
+        "1.3.3": {
+          "url": "https://raw.githubusercontent.com/LiFawaz/reaction-logs/gh-pages-test/pool/lifawaz.reaction-logs@1.3.3.zip",
+          "sha256": "048b194acb69ce92bb86b4d59905f33fd64269611d8c0cd8d1dc10a61dd22f1d",
+          "size": 37269,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": ">=352.2"
+            }
+          }
+        }
+      }
+    }
+  }
+}
