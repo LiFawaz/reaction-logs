@@ -178,13 +178,14 @@ export function normalizeReactionStorage(
             const item = raw as RemovalRecord
             const required = [
                 item.id,
-                item.channelId,
                 item.messageId,
                 item.userId,
                 item.emojiKey,
                 item.identityKey,
             ]
             if (required.some(value => typeof value !== 'string' || value.length === 0)) continue
+            if (typeof item.channelId !== 'string') continue
+            if (item.channelId.length === 0 && !item.id.startsWith('legacy:')) continue
             if (item.timestamp != null && (!Number.isFinite(item.timestamp) || item.timestamp < 0)) continue
             history.set(item.id, {
                 ...item,
@@ -404,7 +405,7 @@ export function buildNativeSnapshot(state: ReactionStorage, now = Date.now()) {
         const identityKey = item.identityKey
         // For old entries without channel IDs, only the pill marker can be scoped.
         const active = normalized.activeReactions.some(active =>
-            active.channelId === item.channelId &&
+            (item.channelId.length === 0 || active.channelId === item.channelId) &&
             active.messageId === item.messageId &&
             active.userId === item.userId &&
             active.emojiKey === item.emojiKey &&
