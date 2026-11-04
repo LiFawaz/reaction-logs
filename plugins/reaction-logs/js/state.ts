@@ -64,8 +64,10 @@ function identityFromPayload(payload: ReactionPayload): ReactionIdentity | null 
     const emojiId = nonEmpty(payload.emoji?.id)
     const emojiName = nonEmpty(payload.emoji?.name)
     const type = reactionType(payload)
+    // Channel/message IDs are globally unique; guildId is optional in some
+    // Flux payloads, so it is retained as metadata but excluded from the key.
+    // This lets ADD and REMOVE events match even if only one carries guildId.
     const baseKey = JSON.stringify([
-        guildId ?? '',
         channelId,
         messageId,
         emojiKey,
@@ -101,7 +103,6 @@ const asActiveReaction = (identity: ReactionIdentity): ActiveReaction => ({
 
 export function activeReactionKey(value: ActiveReaction): string {
     return JSON.stringify([
-        value.guildId ?? '',
         value.channelId,
         value.messageId,
         value.emojiKey,
