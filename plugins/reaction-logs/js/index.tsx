@@ -316,33 +316,19 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             }
 
             const timestamp = Date.now()
-            for (const state of [...states.values()]) {
+            // A bulk event does not identify individual reactors. Mark the plugin's
+            // observed active state as cleared, but do not invent per-user removal records.
+            for (const [key, state] of states) {
                 if (state.messageId !== messageId || state.state !== 'active') continue
                 if (type === 'MESSAGE_REACTION_REMOVE_EMOJI' &&
                     (!identity?.emojiKey || state.emojiKey !== identity.emojiKey)) continue
 
-                const stateIdentity = {
-                    messageId: state.messageId,
-                    channelId: state.channelId,
-                    guildId: state.guildId,
-                    userId: state.userId,
-                    emojiKey: state.emojiKey,
-                    reactionType: state.reactionType,
-                    reactionKey: state.reactionKey,
-                    emojiName: state.emojiKey.startsWith('unicode:')
-                        ? state.emojiKey.slice('unicode:'.length)
-                        : undefined,
-                    emojiId: state.emojiKey.startsWith('id:')
-                        ? state.emojiKey.slice('id:'.length)
-                        : undefined,
-                }
-                recordIndividualRemoval(
-                    stateIdentity,
-                    state.userId,
-                    type === 'MESSAGE_REACTION_REMOVE_ALL' ? 'remove_all' : 'remove_emoji',
-                    undefined,
-                    timestamp,
-                )
+                states.set(key, {
+                    ...state,
+                    state: 'removed',
+                    updatedAt: timestamp,
+                    latestRemovalId: undefined,
+                })
             }
 
             addBulkEvent(type, identity, timestamp)
