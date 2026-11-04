@@ -2,10 +2,14 @@ package me.lifawaz.valenced.reactionlogs
 
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextSwitcher
 import android.widget.TextView
@@ -14,8 +18,12 @@ import app.valenced.xposed.api.DexFinder
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
+import org.json.JSONObject
+import org.json.JSONTokener
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.lang.ref.WeakReference
+import java.text.Normalizer
 import java.util.LinkedHashMap
 import java.util.LinkedHashSet
 import java.util.WeakHashMap
@@ -23,6 +31,10 @@ import java.util.WeakHashMap
 private const val SHORTCUTS_FLEXBOX = "com.discord.reactions.ShortcutsFlexbox"
 private const val MANAGE_REACTIONS_MODEL_PROVIDER =
     "com.discord.widgets.chat.managereactions.ManageReactionsModelProvider"
+private const val MANAGE_REACTIONS_WIDGET =
+    "com.discord.widgets.chat.managereactions.WidgetManageReactions"
+private const val REACTION_USER_ITEM =
+    "com.discord.widgets.chat.managereactions.ManageReactionsResultsAdapter$ReactionUserItem"
 private const val MG_RECYCLER_VIEW_HOLDER =
     "com.discord.utilities.mg_recycler.MGRecyclerViewHolder"
 
@@ -39,8 +51,34 @@ internal class ReactionLogHooks(
         val countColors: ColorStateList?,
     )
     private data class UserRowBinding(val messageId: String, val userId: String)
+    private data class RemovalEntry(
+        val id: String,
+        val guildId: String?,
+        val channelId: String,
+        val messageId: String,
+        val userId: String,
+        val emojiKey: String,
+        val reactionType: Int,
+        val timestamp: Long?,
+    )
+    private data class ActiveEntry(
+        val guildId: String?,
+        val channelId: String,
+        val messageId: String,
+        val userId: String,
+        val emojiKey: String,
+        val reactionType: Int,
+    )
 
     private val removedUsersByKey = LinkedHashMap<String, Set<String>>()
+    private val removalHistory = LinkedHashMap<String, RemovalEntry>()
+    private val activeReactions = LinkedHashSet<ActiveEntry>()
+    private val popupRemovedUsers = LinkedHashSet<String>()
+    @Volatile private var detailsChannelId: String? = null
+    @Volatile private var detailsEmojiKey: String? = null
+    private var lastPopupWidget: WeakReference<Any>? = null
+    private var lastPopupModel: Any? = null
+    private var configurePopupMethod: Method? = null
     // Keep the actual rendered pill view when Discord drops its final reaction model.
     private val retainedPillViews = LinkedHashMap<String, LinearLayout>()
     private val boundPills = WeakHashMap<LinearLayout, String>()
@@ -61,42 +99,102 @@ internal class ReactionLogHooks(
     }
 
     fun setRemoved(json: String) {
-        val parsed = LinkedHashMap<String, Set<String>>()
-        val array = JSONArray(json)
-
-        for (index in 0 until array.length()) {
-            val item = array.optJSONObject(index) ?: continue
-            val key = item.optString("pillKey").takeIf { it.isNotBlank() } ?: continue
-            val users = LinkedHashSet<String>()
-            val userArray = item.optJSONArray("removedUsers")
-            if (userArray != null) {
-                for (userIndex in 0 until userArray.length()) {
-                    val user = userArray.optJSONObject(userIndex) ?: continue
-                    val id = user.optString("id").takeIf {
-                        it.isNotBlank() && it != "null" && it != "*"
-                    } ?: continue
-                    users.add(id)
+        val decoded = JSONTokener(json).nextValue()
+        val root = decoded as? JSONObject
+        val legacy = decoded as? JSONArray
+        val markerArray = root?.optJSONArray("activeRemovals") ?: legacy
+        val parsedMarkers = LinkedHashMap<String, Set<String>>()
+        if (markerArray != null) {
+            for (index in 0 until markerArray.length()) {
+                val item = markerArray.optJSONObject(index) ?: continue
+                val key = item.optString("pillKey").takeIf { it.isNotBlank() } ?: continue
+                val users = LinkedHashSet<String>()
+                val userArray = item.optJSONArray("removedUsers")
+                if (userArray != null) {
+                    for (userIndex in 0 until userArray.length()) {
+                        val user = userArray.opt(userIndex)
+                        val id = when (user) {
+                            is JSONObject -> user.optString("id")
+                            is String -> user
+                            else -> ""
+                        }.takeIf { it.isNotBlank() && it != "null" && it != "*" } ?: continue
+                        users.add(id)
+                    }
                 }
+                if (users.isNotEmpty()) parsedMarkers[key] = users
             }
-            parsed[key] = users
+        }
+
+        val parsedHistory = LinkedHashMap<String, RemovalEntry>()
+        val historyArray = root?.optJSONArray("removalHistory")
+        if (historyArray != null) {
+            for (index in 0 until historyArray.length()) {
+                val item = historyArray.optJSONObject(index) ?: continue
+                val id = item.optString("id").takeIf { it.isNotBlank() } ?: continue
+                val channelId = item.optString("channelId")
+                val messageId = item.optString("messageId")
+                val userId = item.optString("userId")
+                val emojiKey = item.optString("emojiKey")
+                if (messageId.isBlank() || userId.isBlank() || emojiKey.isBlank()) continue
+                parsedHistory[id] = RemovalEntry(
+                    id = id,
+                    guildId = item.optString("guildId").takeIf { it.isNotBlank() && it != "null" },
+                    channelId = channelId,
+                    messageId = messageId,
+                    userId = userId,
+                    emojiKey = emojiKey,
+                    reactionType = item.optInt("reactionType", 0),
+                    timestamp = if (item.isNull("timestamp")) null else item.optLong("timestamp"),
+                )
+            }
+        }
+
+        val parsedActive = LinkedHashSet<ActiveEntry>()
+        val activeArray = root?.optJSONArray("activeReactions")
+        if (activeArray != null) {
+            for (index in 0 until activeArray.length()) {
+                val item = activeArray.optJSONObject(index) ?: continue
+                val channelId = item.optString("channelId")
+                val messageId = item.optString("messageId")
+                val userId = item.optString("userId")
+                val emojiKey = item.optString("emojiKey")
+                if (channelId.isBlank() || messageId.isBlank() || userId.isBlank() || emojiKey.isBlank()) continue
+                parsedActive.add(
+                    ActiveEntry(
+                        guildId = item.optString("guildId").takeIf { it.isNotBlank() && it != "null" },
+                        channelId = channelId,
+                        messageId = messageId,
+                        userId = userId,
+                        emojiKey = emojiKey,
+                        reactionType = item.optInt("reactionType", 0),
+                    ),
+                )
+            }
         }
 
         synchronized(removedUsersByKey) {
             removedUsersByKey.clear()
-            removedUsersByKey.putAll(parsed)
+            removedUsersByKey.putAll(parsedMarkers)
         }
+        synchronized(removalHistory) {
+            removalHistory.clear()
+            removalHistory.putAll(parsedHistory)
+        }
+        synchronized(activeReactions) {
+            activeReactions.clear()
+            activeReactions.addAll(parsedActive)
+        }
+
         val staleRetainedViews = synchronized(retainedPillViews) {
             val stale = retainedPillViews
-                .filterKeys { it !in parsed.keys }
+                .filterKeys { it !in parsedMarkers.keys }
                 .values
                 .toList()
-            retainedPillViews.keys.retainAll(parsed.keys)
+            retainedPillViews.keys.retainAll(parsedMarkers.keys)
             stale
         }
 
         mainHandler.post {
-            // Remove an old retained pill when the same emoji is added again.
-            // Discord can then render the newly added reaction as a fresh pill.
             staleRetainedViews.forEach { view ->
                 (view.parent as? ViewGroup)?.removeView(view)
                 boundPills.remove(view)
@@ -111,6 +209,9 @@ internal class ReactionLogHooks(
 
     fun clear() {
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
+        synchronized(removalHistory) { removalHistory.clear() }
+        synchronized(activeReactions) { activeReactions.clear() }
+        synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
         val retained = synchronized(retainedPillViews) {
             retainedPillViews.values.toList().also { retainedPillViews.clear() }
         }
@@ -137,6 +238,12 @@ internal class ReactionLogHooks(
             retainedPillViews.values.toList().also { retainedPillViews.clear() }
         }
         detailsMessageId = null
+        detailsChannelId = null
+        detailsEmojiKey = null
+        lastPopupWidget = null
+        lastPopupModel = null
+        configurePopupMethod = null
+        synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
         mainHandler.post {
             retained.forEach { view ->
                 (view.parent as? ViewGroup)?.removeView(view)
@@ -321,27 +428,31 @@ internal class ReactionLogHooks(
      * reaction-removal event was recorded for that message.
      */
     private fun hookReactionUserRows(dexFinder: DexFinder) {
-        val providerClass = dexFinder.classLoader.loadClass(MANAGE_REACTIONS_MODEL_PROVIDER)
-        val messageIdGetter = providerClass.methods.firstOrNull {
-            it.name == "getMessageId" && it.parameterCount == 0
-        } ?: error("ManageReactionsModelProvider.getMessageId not found")
-        val getModel = providerClass.methods.firstOrNull {
-            it.name == "get" && it.parameterCount == 0
-        } ?: error("ManageReactionsModelProvider.get not found")
+        val widgetClass = dexFinder.classLoader.loadClass(MANAGE_REACTIONS_WIDGET)
+        val configureUi = widgetClass.declaredMethods.firstOrNull {
+            it.name == "configureUI" && it.parameterCount == 1
+        } ?: error("WidgetManageReactions.configureUI(model) not found")
+        configureUi.isAccessible = true
+        configurePopupMethod = configureUi
 
-        unhooks += getModel.hook(before = { param ->
-            detailsMessageId = runCatching {
-                messageIdGetter.invoke(param.thisObject)?.toString()
-            }.getOrNull()
+        unhooks += configureUi.hook(before = { param ->
+            val model = param.args.getOrNull(0) ?: return@hook
+            val widget = param.thisObject
+            lastPopupWidget = WeakReference(widget)
+            lastPopupModel = model
+            val augmented = augmentReactionPopup(widget, model, dexFinder.classLoader)
+            if (augmented !== model) param.args[0] = augmented
         })
 
         val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
-        val configure = holderBase.declaredMethods.firstOrNull {
-            it.name == "onConfigure" &&
-                it.parameterCount == 2 &&
-                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                it.parameterTypes[1] == Any::class.java
-        } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
+        val configure = generateSequence(holderBase) { it.superclass }
+            .flatMap { it.declaredMethods.asSequence() }
+            .firstOrNull {
+                it.name == "onConfigure" &&
+                    it.parameterCount == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1] == Any::class.java
+            } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
         configure.isAccessible = true
 
         unhooks += configure.hook(after = { param ->
@@ -350,42 +461,216 @@ internal class ReactionLogHooks(
             val data = param.args.getOrNull(1) ?: return@hook
             val holderName = holder.javaClass.name
             val dataName = data.javaClass.name
-
-            // Do not touch unrelated RecyclerViews. Manage Reactions has a dedicated
-            // holder family; the data-class check is a fallback for renamed holders.
             if (
-                !holderName.contains("ManageReactions", ignoreCase = true) &&
-                !dataName.contains("User", ignoreCase = true) &&
-                !dataName.contains("Member", ignoreCase = true)
-            ) {
-                return@hook
-            }
+                !holderName.contains("ManageReactionsResultsAdapter", ignoreCase = true) &&
+                !dataName.contains("ReactionUserItem", ignoreCase = true)
+            ) return@hook
 
             val itemView = holderItemView(holder) ?: return@hook
-            val userId = extractUserId(data)
-            if (userId == null) {
-                XposedBridge.log("Reaction Logs: could not read user ID from reaction-detail row $dataName")
-                return@hook
-            }
-
+            val userId = extractUserId(data) ?: return@hook
             bindUserRow(itemView, messageId, userId)
         })
 
-        XposedBridge.log("Reaction Logs: reaction-user row hook installed")
+        XposedBridge.log("Reaction Logs: exact reaction-popup row hooks installed")
     }
+
+    /**
+     * Append the users removed from this exact message + selected emoji to the
+     * existing Discord model. Constructing Discord's own ReactionUserItem keeps
+     * its real User, avatar, display name and profile-click behavior.
+     */
+    private fun augmentReactionPopup(widget: Any, model: Any, loader: ClassLoader): Any {
+        val provider = readMember(widget, "modelProvider") ?: return model
+        val channelId = readMember(provider, "channelId")?.toString() ?: return model
+        val messageId = readMember(provider, "messageId")?.toString() ?: return model
+
+        val reactionItems = readMember(model, "reactionItems") as? List<*> ?: return model
+        val selectedItem = reactionItems.firstOrNull {
+            readMember(it, "isSelected") == true
+        } ?: return model
+        val selectedReaction = readMember(selectedItem, "reaction") ?: return model
+        val emoji = readMember(selectedReaction, "emoji") ?: return model
+        val selectedEmojiKey = emojiKey(emoji) ?: return model
+        val channelLong = channelId.toLongOrNull() ?: return model
+        val messageLong = messageId.toLongOrNull() ?: return model
+        val guildId = resolveGuildId(loader, channelLong)
+
+        detailsChannelId = channelId
+        detailsMessageId = messageId
+        detailsEmojiKey = selectedEmojiKey
+
+        val originalItems = readMember(model, "userItems") as? List<*> ?: return model
+        val existingUsers = originalItems.mapNotNull(::extractUserId).toMutableSet()
+        val output = ArrayList<Any>(originalItems.size + 8)
+        originalItems.filterNotNullTo(output)
+
+        val activeForSelection = synchronized(activeReactions) {
+            activeReactions.filter { active ->
+                active.channelId == channelId &&
+                    active.messageId == messageId &&
+                    active.emojiKey == selectedEmojiKey &&
+                    (active.guildId.isNullOrBlank() || guildId.isNullOrBlank() || active.guildId == guildId)
+            }.toList()
+        }
+        val historyForSelection = synchronized(removalHistory) {
+            removalHistory.values.filter { entry ->
+                entry.messageId == messageId &&
+                    (entry.channelId.isBlank() || entry.channelId == channelId) &&
+                    entry.emojiKey == selectedEmojiKey &&
+                    (entry.guildId.isNullOrBlank() || guildId.isNullOrBlank() || entry.guildId == guildId)
+            }.sortedBy { it.timestamp ?: 0L }
+        }
+
+        val currentActiveIds = activeForSelection.mapTo(LinkedHashSet()) { it.userId }
+        val newlyAdded = LinkedHashSet<String>()
+        for (active in activeForSelection) {
+            if (!existingUsers.add(active.userId)) continue
+            val user = resolveUser(loader, active.userId) ?: continue
+            val member = guildId?.let { resolveGuildMember(loader, it, active.userId) }
+            createReactionUserItem(loader, user, channelLong, messageLong, emoji, member)?.let {
+                output.add(it)
+                newlyAdded.add(active.userId)
+            }
+        }
+
+        val removedIds = LinkedHashSet<String>()
+        for (entry in historyForSelection) {
+            if (entry.userId in existingUsers || entry.userId in currentActiveIds) continue
+            val user = resolveUser(loader, entry.userId) ?: continue
+            val member = guildId?.let { resolveGuildMember(loader, it, entry.userId) }
+            val row = createReactionUserItem(loader, user, channelLong, messageLong, emoji, member)
+                ?: continue
+            output.add(row)
+            existingUsers.add(entry.userId)
+            removedIds.add(entry.userId)
+        }
+
+        synchronized(popupRemovedUsers) {
+            popupRemovedUsers.clear()
+            popupRemovedUsers.addAll(removedIds)
+        }
+        refreshUserRows()
+
+        if (output.size == originalItems.size) return model
+        val copy = model.javaClass.methods.firstOrNull {
+            it.name == "copy" && it.parameterCount == 2
+        }
+        if (copy != null) {
+            return runCatching { copy.invoke(model, reactionItems, output) }.getOrNull() ?: model
+        }
+        val constructor = model.javaClass.declaredConstructors.firstOrNull {
+            it.parameterCount == 2 &&
+                List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
+                List::class.java.isAssignableFrom(it.parameterTypes[1])
+        } ?: return model
+        return runCatching {
+            constructor.isAccessible = true
+            constructor.newInstance(reactionItems, output)
+        }.getOrNull() ?: model
+    }
+
+    private fun readMember(target: Any?, name: String): Any? {
+        if (target == null) return null
+        val suffix = name.replaceFirstChar { it.uppercase() }
+        val method = target.javaClass.methods.firstOrNull {
+            it.parameterCount == 0 && it.name in setOf(name, "get$suffix", "is$suffix")
+        }
+        if (method != null) {
+            runCatching { method.invoke(target) }.getOrNull()?.let { return it }
+        }
+
+        var current: Class<*>? = target.javaClass
+        while (current != null) {
+            val field = runCatching { current.getDeclaredField(name) }.getOrNull()
+            if (field != null && !Modifier.isStatic(field.modifiers)) {
+                runCatching {
+                    field.isAccessible = true
+                    field.get(target)
+                }.getOrNull()?.let { return it }
+            }
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun resolveStore(loader: ClassLoader, getter: String): Any? = runCatching {
+        val stream = loader.loadClass("com.discord.stores.StoreStream")
+        val method = stream.methods.firstOrNull {
+            Modifier.isStatic(it.modifiers) && it.name == getter && it.parameterCount == 0
+        } ?: return@runCatching null
+        method.invoke(null)
+    }.getOrNull()
+
+    private fun resolveUser(loader: ClassLoader, userId: String): Any? {
+        val numericId = userId.toLongOrNull() ?: return null
+        val store = resolveStore(loader, "getUsers") ?: return null
+        val users = readMember(store, "users") as? Map<*, *>
+            ?: runCatching {
+                store.javaClass.methods.firstOrNull {
+                    it.name == "getUsers" && it.parameterCount == 0
+                }?.invoke(store) as? Map<*, *>
+            }.getOrNull()
+        users?.get(numericId)?.let { return it }
+        users?.get(userId)?.let { return it }
+
+        return runCatching {
+            store.javaClass.methods.firstOrNull {
+                it.name == "getUser" && it.parameterCount == 1
+            }?.invoke(store, numericId)
+        }.getOrNull()
+    }
+
+    private fun resolveGuildId(loader: ClassLoader, channelId: Long): String? = runCatching {
+        val store = resolveStore(loader, "getChannels") ?: return@runCatching null
+        val channel = store.javaClass.methods.firstOrNull {
+            it.name == "getChannel" && it.parameterCount == 1
+        }?.invoke(store, channelId) ?: return@runCatching null
+        readMember(channel, "guildId")?.toString()?.takeIf { it != "0" && it != "null" }
+    }.getOrNull()
+
+    private fun resolveGuildMember(loader: ClassLoader, guildId: String, userId: String): Any? = runCatching {
+        val guilds = resolveStore(loader, "getGuilds") ?: return@runCatching null
+        val members = guilds.javaClass.methods.firstOrNull {
+            it.name == "getMembers" && it.parameterCount == 0
+        }?.invoke(guilds) as? Map<*, *> ?: return@runCatching null
+        val guildMembers = members[guildId.toLongOrNull()] as? Map<*, *>
+            ?: members[guildId] as? Map<*, *>
+            ?: return@runCatching null
+        val numericUserId = userId.toLongOrNull()
+        guildMembers[numericUserId] ?: guildMembers[userId]
+    }.getOrNull()
+
+    private fun createReactionUserItem(
+        loader: ClassLoader,
+        user: Any,
+        channelId: Long,
+        messageId: Long,
+        emoji: Any,
+        guildMember: Any?,
+    ): Any? = runCatching {
+        val itemClass = loader.loadClass(REACTION_USER_ITEM)
+        val constructor = itemClass.declaredConstructors.firstOrNull { it.parameterCount == 6 }
+            ?: return@runCatching null
+        constructor.isAccessible = true
+        constructor.newInstance(user, channelId, messageId, emoji, false, guildMember)
+    }.onFailure {
+        XposedBridge.log("Reaction Logs: could not create removed-user popup row: $it")
+    }.getOrNull()
 
     private fun bindUserRow(view: View, messageId: String, userId: String) {
         userRows[view] = UserRowBinding(messageId, userId)
         mainHandler.post {
             val binding = userRows[view] ?: return@post
             if (binding.messageId != messageId || binding.userId != userId) return@post
-            applyUserRowStyle(view, isRemovedUser(messageId, userId))
+            val highlighted = synchronized(popupRemovedUsers) { userId in popupRemovedUsers }
+            applyUserRowStyle(view, highlighted)
         }
     }
 
     private fun refreshUserRows() {
         for ((view, binding) in userRows.entries.toList()) {
-            applyUserRowStyle(view, isRemovedUser(binding.messageId, binding.userId))
+            val highlighted = synchronized(popupRemovedUsers) { binding.userId in popupRemovedUsers }
+            applyUserRowStyle(view, highlighted)
         }
     }
 
@@ -539,8 +824,8 @@ internal class ReactionLogHooks(
                 ?.invoke(emoji)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
         }.getOrNull()
 
-        if (name != null) return if (id != null) "$name:$id" else name
-        if (id != null) return id
+        if (id != null) return "custom:$id"
+        if (name != null) return "unicode:${Normalizer.normalize(name, Normalizer.Form.NFC)}"
 
         val text = emoji.toString()
         val parsedId = ID_PATTERN.find(text)?.groupValues?.get(1)
@@ -548,9 +833,9 @@ internal class ReactionLogHooks(
         val parsedName = NAME_PATTERN.find(text)?.groupValues?.get(1)
             ?.takeIf { it.isNotBlank() && it != "null" }
         return when {
-            parsedName != null && parsedId != null -> "$parsedName:$parsedId"
-            parsedName != null -> parsedName
-            else -> parsedId
+            parsedId != null -> "custom:$parsedId"
+            parsedName != null -> "unicode:${Normalizer.normalize(parsedName, Normalizer.Form.NFC)}"
+            else -> null
         }
     }
 
