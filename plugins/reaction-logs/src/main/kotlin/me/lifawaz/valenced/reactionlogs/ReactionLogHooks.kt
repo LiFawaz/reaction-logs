@@ -447,7 +447,7 @@ internal class ReactionLogHooks(
         val selectedReaction = readMember(selectedItem, "reaction") ?: return clearPopupSelection(model)
         val emoji = readMember(selectedReaction, "emoji") ?: return clearPopupSelection(model)
         val selectedEmojiKey = emojiKey(emoji) ?: return clearPopupSelection(model)
-        val selectedReactionType = reactionType(selectedReaction)
+        val selectedReactionType = reactionType(selectedReaction, selectedItem)
         val channelLong = channelId.toLongOrNull() ?: return clearPopupSelection(model)
         val messageLong = messageId.toLongOrNull() ?: return clearPopupSelection(model)
         val guildId = resolveGuildId(loader, channelLong)
@@ -691,10 +691,20 @@ internal class ReactionLogHooks(
         popupRetryAttempts = 0
     }
 
-    private fun reactionType(reaction: Any): Int {
-        val direct = readMember(reaction, "reactionType") ?: readMember(reaction, "type")
+    private fun reactionType(reaction: Any, selectedItem: Any): Int {
+        val direct = readMember(reaction, "reactionType")
+            ?: readMember(reaction, "type")
+            ?: readMember(selectedItem, "reactionType")
+            ?: readMember(selectedItem, "type")
         if (direct is Number) return direct.toInt()
-        val burst = readMember(reaction, "isBurst") ?: readMember(reaction, "burst")
+        if (direct is String) {
+            direct.toIntOrNull()?.let { return it }
+            if (direct.equals("burst", ignoreCase = true)) return 1
+        }
+        val burst = readMember(reaction, "isBurst")
+            ?: readMember(reaction, "burst")
+            ?: readMember(selectedItem, "isBurst")
+            ?: readMember(selectedItem, "burst")
         return if (burst == true) 1 else 0
     }
 
