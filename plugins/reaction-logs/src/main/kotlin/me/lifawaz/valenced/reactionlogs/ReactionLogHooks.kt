@@ -30,7 +30,7 @@ private val REMOVED_RED = Color.rgb(237, 66, 69)
 private val REMOVED_TINT = Color.argb(48, 237, 66, 69)
 
 internal class ReactionLogHooks(
-    dexFinder: DexFinder,
+    private val dexFinder: DexFinder,
     @Suppress("UNUSED_PARAMETER") bridge: ValencedBridge,
 ) {
     private data class Pill(val reaction: Any?, val emoji: Any?, val burst: Boolean, val count: Int)
@@ -343,7 +343,9 @@ internal class ReactionLogHooks(
             loader.loadClass(
                 "com.discord.widgets.chat.managereactions.ManageReactionsEmojisAdapter\$ReactionEmojiItem",
             )
-        }.getOrNull() ?: return null
+        }.getOrNull() ?: dexFinder.findClass {
+            matcher { addUsingString("ReactionEmojiItem(reaction=") }
+        } ?: return null
 
         if (existingItem != null) {
             val copy = itemClass.methods.firstOrNull {
@@ -377,6 +379,9 @@ internal class ReactionLogHooks(
                     "com.discord.widgets.chat.managereactions.ManageReactionsModel",
                 )
             }.getOrNull()
+            ?: dexFinder.findClass {
+                matcher { addUsingString("ManageReactionsModel(reactionItems=") }
+            }
             ?: return null
 
         if (model != null) {
@@ -412,7 +417,9 @@ internal class ReactionLogHooks(
             loader.loadClass(
                 "com.discord.widgets.chat.managereactions.ManageReactionsResultsAdapter\$ReactionUserItem",
             )
-        }.getOrNull() ?: return null
+        }.getOrNull() ?: dexFinder.findClass {
+            matcher { addUsingString("ReactionUserItem(user=") }
+        } ?: return null
 
         val messageLong = messageId.toLongOrNull() ?: return null
         val constructor = itemClass.declaredConstructors.firstOrNull { candidate ->
