@@ -761,26 +761,12 @@ internal class ReactionLogHooks(
             val data = param.args.getOrNull(1) ?: return@hook
             val messageId = invokeGetter(data, "getMessageId")?.toString()
                 ?: detailsMessageId ?: return@hook
-            val holderName = holder.javaClass.name
             val dataName = data.javaClass.name
-
-            // Do not touch unrelated RecyclerViews. Manage Reactions has a dedicated
-            // holder family; the data-class check is a fallback for renamed holders.
-            if (
-                !holderName.contains("ManageReactions", ignoreCase = true) &&
-                !dataName.contains("User", ignoreCase = true) &&
-                !dataName.contains("Member", ignoreCase = true)
-            ) {
-                return@hook
-            }
-
             val itemView = holderItemView(holder) ?: return@hook
-            val userId = extractUserId(data)
-            if (userId == null) {
-                XposedBridge.log("Reaction Logs: could not read user ID from reaction-detail row $dataName")
-                return@hook
-            }
+            val userId = extractUserId(data) ?: return@hook
 
+            // Only Discord's reaction-user model has this combination of a user identity,
+            // message identity and a reaction emoji. This also survives R8 class renaming.
             val rowEmoji = invokeGetter(data, "getEmoji")
             val emojiKey = rowEmoji?.let(::emojiKey)
             if (emojiKey.isNullOrBlank()) {
