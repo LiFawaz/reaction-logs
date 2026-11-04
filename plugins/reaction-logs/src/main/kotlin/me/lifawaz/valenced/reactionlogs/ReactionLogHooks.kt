@@ -488,7 +488,9 @@ internal class ReactionLogHooks(
     }
 
     private fun targetedEmojiKey(provider: Any): String? {
-        selectedEmojiByProvider[provider]?.let { return it }
+        synchronized(selectedEmojiByProvider) {
+            selectedEmojiByProvider[provider]?.let { return it }
+        }
         var current: Class<*>? = provider.javaClass
         while (current != null) {
             val field = current.declaredFields.firstOrNull {
@@ -717,18 +719,40 @@ internal class ReactionLogHooks(
      * reaction-removal event was recorded for that message.
      */
     private fun hookReactionUserRows(dexFinder: DexFinder) {
-        val providerClass = dexFinder.classLoader.loadClass(MANAGE_REACTIONS_MODEL_PROVIDER)
+        // Names are used on un-obfuscated clients; DexFinder covers Discord's R8 builds.
+        val providerClass = runCatching {
+            dexFinder.classLoader.loadClass(MANAGE_REACTIONS_MODEL_PROVIDER)
+        }.getOrNull() ?: dexFinder.findClass {
+            searchPackages("com.discord.widgets.chat.managereactions")
+            matcher {
+                addField { type("rx.subjects.SerializedSubject") }
+                addMethod {
+                    paramCount(0)
+                    returnType("rx.Observable")
+                }
+                addMethod {
+                    paramTypes(String::class.java)
+                    returnType("void")
+                }
+            }
+        } ?: error("ManageReactionsModelProvider not found")
         val messageIdGetter = providerClass.methods.firstOrNull {
             it.name == "getMessageId" && it.parameterCount == 0
-        } ?: error("ManageReactionsModelProvider.getMessageId not found")
+        }
         val getModel = providerClass.methods.firstOrNull {
             it.name == "get" && it.parameterCount == 0
+        } ?: dexFinder.findMethod {
+            matcher {
+                declaredClass(providerClass.name)
+                paramCount(0)
+                returnType("rx.Observable")
+            }
         } ?: error("ManageReactionsModelProvider.get not found")
 
         unhooks += getModel.hook(
             before = { param ->
                 detailsMessageId = runCatching {
-                    messageIdGetter.invoke(param.thisObject)?.toString()
+                    messageIdGetter?.invoke(param.thisObject)?.toString()
                 }.getOrNull()
             },
             after = { param ->
@@ -736,23 +760,46 @@ internal class ReactionLogHooks(
                 param.result = wrapManageReactionsObservable(param.thisObject, observable)
             },
         )
-        providerClass.methods.firstOrNull {
+        val onEmojiTargeted = providerClass.methods.firstOrNull {
             it.name == "onEmojiTargeted" && it.parameterCount == 1
-        }?.let { onEmojiTargeted ->
-            unhooks += onEmojiTargeted.hook(after = { param ->
+        } ?: dexFinder.findMethod {
+            matcher {
+                declaredClass(providerClass.name)
+                paramTypes(String::class.java)
+                returnType("void")
+            }
+        }
+        onEmojiTargeted?.let { method ->
+            unhooks += method.hook(after = { param ->
                 val raw = param.args.firstOrNull()?.toString()
-                if (!raw.isNullOrBlank()) {
+                if (!raw.isNullOrBlank()) synchronized(selectedEmojiByProvider) {
                     selectedEmojiByProvider[param.thisObject] = normalizeTargetEmojiKey(raw)
                 }
             })
         }
 
-        val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
+        val holderBase = runCatching {
+            dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
+        }.getOrNull() ?: dexFinder.findClass {
+            searchPackages("com.discord.utilities.mg_recycler")
+            matcher {
+                addMethod {
+                    paramTypes(Int::class.javaPrimitiveType, Any::class.java)
+                    returnType("void")
+                }
+            }
+        } ?: error("MGRecyclerViewHolder not found")
         val configure = holderBase.declaredMethods.firstOrNull {
             it.name == "onConfigure" &&
                 it.parameterCount == 2 &&
                 it.parameterTypes[0] == Int::class.javaPrimitiveType &&
                 it.parameterTypes[1] == Any::class.java
+        } ?: dexFinder.findMethod {
+            matcher {
+                declaredClass(holderBase.name)
+                paramTypes(Int::class.javaPrimitiveType, Any::class.java)
+                returnType("void")
+            }
         } ?: error("MGRecyclerViewHolder.onConfigure(int, Object) not found")
         configure.isAccessible = true
 
