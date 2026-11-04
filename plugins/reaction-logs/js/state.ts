@@ -240,7 +240,7 @@ export function normalizeReactionStorage(
 
     // Keep the epoch map bounded and only for identities that still matter.
     const liveIdentityKeys = new Set([
-        ...active.values().map(activeReactionKey),
+        ...[...active.values()].map(activeReactionKey),
         ...retained.map(item => item.identityKey),
     ])
     for (const key of Object.keys(epochs)) {
@@ -362,10 +362,10 @@ export function applyMessageDelete(
     if (!messageId) return state
 
     state.removalHistory = state.removalHistory.filter(
-        item => item.messageId !== messageId || (channelId && item.channelId && item.channelId !== channelId),
+        item => item.messageId !== messageId || (channelId != null && item.channelId.length > 0 && item.channelId !== channelId),
     )
     state.activeReactions = state.activeReactions.filter(
-        item => item.messageId !== messageId || (channelId && item.channelId !== channelId),
+        item => item.messageId !== messageId || (channelId != null && item.channelId !== channelId),
     )
     const retainedIdentityKeys = new Set([
         ...state.removalHistory.map(item => item.identityKey),
@@ -398,9 +398,7 @@ export function buildNativeSnapshot(state: ReactionStorage) {
     const grouped = new Map<string, Set<string>>()
 
     for (const item of normalized.removalHistory) {
-        const identityKey = item.id.startsWith('legacy:')
-            ? item.identityKey
-            : item.identityKey
+        const identityKey = item.identityKey
         // For old entries without channel IDs, only the pill marker can be scoped.
         const active = normalized.activeReactions.some(active =>
             active.channelId === item.channelId &&
