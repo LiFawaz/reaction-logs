@@ -556,7 +556,7 @@ internal class ReactionLogHooks(
         }
 
         // Prefer the message ID from the popup launcher. The row Activity context
-        // is checked independently in bindDetailsRow as a fallback.
+        // is captured independently from the popup launcher as a fallback.
         val popupOpener = dexFinder.findMethod {
             matcher {
                 paramCount(4)
