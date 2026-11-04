@@ -27,7 +27,7 @@ interface ReactionPayload {
     optimistic?: boolean
 }
 
-type UserTimes = Map<string, number>
+type RemovedUsers = Set<string>
 
 const keyFor = (messageId: string, emojiKey: string, reactionType: number) =>
     messageId + '|' + emojiKey + '|' + reactionType
@@ -56,7 +56,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
     start({ cleanup, plugin, jsonStorage }) {
         // Removal logging and red-pill retention are deliberately independent.
-        const removalLogs = new Map<string, UserTimes>()
+        const removalLogs = new Map<string, RemovedUsers>()
         const retainedPillKeys = new Set<string>()
 
         const cache = jsonStorage.cache ?? DefaultStorage
@@ -89,14 +89,10 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
         const syncRemovalLogs = () => {
             try {
-                const entries: RemovalLogEntry[] = [...removalLogs].map(([pillKey, users]) => {
-                    const removedUsers = [...users].map(([id, removedAt]) => ({ id, removedAt }))
-                    const removedAt = removedUsers.reduce(
-                        (latest, user) => Math.max(latest, user.removedAt),
-                        0,
-                    )
-                    return { pillKey, removedAt, removedUsers }
-                })
+                const entries: RemovalLogEntry[] = [...removalLogs].map(([pillKey, users]) => ({
+                    pillKey,
+                    removedUsers: [...users].map(id => ({ id })),
+                }))
                 setRemovalLogs(JSON.stringify(entries))
             } catch (error) {
                 plugin.reportError('Failed to sync removed-reaction logs: ' + String(error))
@@ -118,14 +114,10 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
         const persistState = () => {
             const snapshot: ReactionStorage = {
-                removalLogs: [...removalLogs].map(([pillKey, users]) => {
-                    const removedUsers = [...users].map(([id, removedAt]) => ({ id, removedAt }))
-                    const removedAt = removedUsers.reduce(
-                        (latest, user) => Math.max(latest, user.removedAt),
-                        0,
-                    )
-                    return { pillKey, removedAt, removedUsers }
-                }),
+                removalLogs: [...removalLogs].map(([pillKey, users]) => ({
+                    pillKey,
+                    removedUsers: [...users].map(id => ({ id })),
+                })),
                 retainedPillKeys: [...retainedPillKeys],
             }
 
@@ -138,8 +130,8 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
         const recordRemoval = (payload: ReactionPayload, key: string, knownUserId?: string) => {
             const userId = knownUserId ?? getEventUserId(payload) ?? '*'
-            const users = removalLogs.get(key) ?? new Map<string, number>()
-            users.set(userId, Date.now())
+            const users = removalLogs.get(key) ?? new Set<string>()
+            users.add(userId)
             removalLogs.set(key, users)
             retainedPillKeys.add(key)
         }
