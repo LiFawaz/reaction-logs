@@ -416,7 +416,8 @@ internal class ReactionLogHooks(
                     for ((key, view) in retained) {
                         if (key in currentKeys) {
                             synchronized(retainedPillViews) { retainedPillViews.remove(key) }
-                            if (view.parent !== flexbox) {
+                            val currentView = boundPills.entries.firstOrNull { it.value == key }?.key
+                            if (currentView !== view) {
                                 (view.parent as? ViewGroup)?.removeView(view)
                                 boundPills.remove(view)
                                 applyPillStyle(view, false)
