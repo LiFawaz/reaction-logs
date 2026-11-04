@@ -18,6 +18,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Run reaction event regression tests
+        run: bun test plugins/reaction-logs/tests
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
