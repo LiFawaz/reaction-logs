@@ -182,9 +182,9 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
 
             return {
                 messageId,
-                channelId: asString(payload.channelId, payload.channel_id),
-                guildId: asString(payload.guildId, payload.guild_id),
-                userId: asString(payload.userId, payload.user_id),
+                channelId: asString(payload.channelId, payload.channel_id) ?? undefined,
+                guildId: asString(payload.guildId, payload.guild_id) ?? undefined,
+                userId: asString(payload.userId, payload.user_id) ?? undefined,
                 emojiKey,
                 emojiName: emojiName ?? undefined,
                 emojiId: emojiId ?? undefined,
