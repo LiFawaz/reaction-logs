@@ -50,7 +50,13 @@ internal class ReactionLogHooks(
         val backgroundTint: ColorStateList?,
         val countColors: ColorStateList?,
     )
-    private data class UserRowBinding(val messageId: String, val userId: String)
+    private data class UserRowBinding(
+        val channelId: String,
+        val messageId: String,
+        val emojiKey: String,
+        val reactionType: Int,
+        val userId: String,
+    )
     private data class RemovalEntry(
         val id: String,
         val guildId: String?,
@@ -76,6 +82,7 @@ internal class ReactionLogHooks(
     private val popupRemovedUsers = LinkedHashSet<String>()
     @Volatile private var detailsChannelId: String? = null
     @Volatile private var detailsEmojiKey: String? = null
+    @Volatile private var detailsReactionType: Int = 0
     private var lastPopupWidget: WeakReference<Any>? = null
     private var lastPopupModel: Any? = null
     private var configurePopupMethod: Method? = null
@@ -227,6 +234,7 @@ internal class ReactionLogHooks(
         detailsMessageId = null
         detailsChannelId = null
         detailsEmojiKey = null
+        detailsReactionType = 0
         lastPopupWidget = null
         lastPopupModel = null
         configurePopupMethod = null
@@ -420,8 +428,6 @@ internal class ReactionLogHooks(
      * its real User, avatar, display name and profile-click behavior.
      */
     private fun augmentReactionPopup(widget: Any, model: Any, loader: ClassLoader): Any {
-        synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
-        refreshUserRows()
         val provider = readMember(widget, "modelProvider") ?: return model
         val channelId = readMember(provider, "channelId")?.toString() ?: return model
         val messageId = readMember(provider, "messageId")?.toString() ?: return model
@@ -433,6 +439,7 @@ internal class ReactionLogHooks(
         val selectedReaction = readMember(selectedItem, "reaction") ?: return model
         val emoji = readMember(selectedReaction, "emoji") ?: return model
         val selectedEmojiKey = emojiKey(emoji) ?: return model
+        val selectedReactionType = reactionType(selectedReaction)
         val channelLong = channelId.toLongOrNull() ?: return model
         val messageLong = messageId.toLongOrNull() ?: return model
         val guildId = resolveGuildId(loader, channelLong)
@@ -440,17 +447,16 @@ internal class ReactionLogHooks(
         detailsChannelId = channelId
         detailsMessageId = messageId
         detailsEmojiKey = selectedEmojiKey
+        detailsReactionType = selectedReactionType
 
         val originalItems = readMember(model, "userItems") as? List<*> ?: return model
-        val existingUsers = originalItems.mapNotNull(::extractUserId).toMutableSet()
-        val output = ArrayList<Any>(originalItems.size + 8)
-        originalItems.filterNotNullTo(output)
 
         val activeForSelection = synchronized(activeReactions) {
             activeReactions.filter { active ->
                 active.channelId == channelId &&
                     active.messageId == messageId &&
                     active.emojiKey == selectedEmojiKey &&
+                    active.reactionType == selectedReactionType &&
                     (active.guildId.isNullOrBlank() || guildId.isNullOrBlank() || active.guildId == guildId)
             }.toList()
         }
@@ -459,6 +465,7 @@ internal class ReactionLogHooks(
                 entry.messageId == messageId &&
                     (entry.channelId.isBlank() || entry.channelId == channelId) &&
                     entry.emojiKey == selectedEmojiKey &&
+                    entry.reactionType == selectedReactionType &&
                     (entry.guildId.isNullOrBlank() || guildId.isNullOrBlank() || entry.guildId == guildId)
             }.sortedBy { it.timestamp ?: 0L }
         }
@@ -498,7 +505,9 @@ internal class ReactionLogHooks(
 
         synchronized(popupRemovedUsers) {
             popupRemovedUsers.clear()
-            popupRemovedUsers.addAll(removedIds)
+            removedIds.forEach { userId ->
+                popupRemovedUsers.add(userRowKey(channelId, messageId, selectedEmojiKey, selectedReactionType, userId))
+            }
         }
         refreshUserRows()
 
@@ -609,20 +618,33 @@ internal class ReactionLogHooks(
     }.getOrNull()
 
     private fun bindUserRow(view: View, messageId: String, userId: String) {
-        userRows[view] = UserRowBinding(messageId, userId)
+        val channelId = detailsChannelId ?: return
+        val emojiKey = detailsEmojiKey ?: return
+        val reactionType = detailsReactionType
+        val binding = UserRowBinding(channelId, messageId, emojiKey, reactionType, userId)
+        userRows[view] = binding
         mainHandler.post {
-            val binding = userRows[view] ?: return@post
-            if (binding.messageId != messageId || binding.userId != userId) return@post
-            val highlighted = synchronized(popupRemovedUsers) { userId in popupRemovedUsers }
+            if (userRows[view] != binding) return@post
+            val highlighted = synchronized(popupRemovedUsers) {
+                userRowKey(binding.channelId, binding.messageId, binding.emojiKey, binding.reactionType, binding.userId) in popupRemovedUsers
+            }
             applyUserRowStyle(view, highlighted)
         }
     }
 
     private fun refreshUserRows() {
         for ((view, binding) in userRows.entries.toList()) {
-            val highlighted = synchronized(popupRemovedUsers) { binding.userId in popupRemovedUsers }
+            val key = userRowKey(binding.channelId, binding.messageId, binding.emojiKey, binding.reactionType, binding.userId)
+            val highlighted = synchronized(popupRemovedUsers) { key in popupRemovedUsers }
             applyUserRowStyle(view, highlighted)
         }
+    }
+
+    private fun reactionType(reaction: Any): Int {
+        val direct = readMember(reaction, "reactionType") ?: readMember(reaction, "type")
+        if (direct is Number) return direct.toInt()
+        val burst = readMember(reaction, "isBurst") ?: readMember(reaction, "burst")
+        return if (burst == true) 1 else 0
     }
 
     private fun applyUserRowStyle(view: View, highlighted: Boolean) {
@@ -798,6 +820,9 @@ internal class ReactionLogHooks(
 
 private fun reactionKey(messageId: String, emojiKey: String, type: Int) =
     "$messageId|$emojiKey|$type"
+
+private fun userRowKey(channelId: String, messageId: String, emojiKey: String, type: Int, userId: String) =
+    listOf(channelId, messageId, emojiKey, type.toString(), userId).joinToString("\u0000")
 
 private inline fun Method.hook(
     crossinline before: (XC_MethodHook.MethodHookParam) -> Unit = {},
