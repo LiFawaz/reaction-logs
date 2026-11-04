@@ -218,11 +218,9 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         ) => {
             const key = stateKey(identity.reactionKey, userId)
             const existing = states.get(key)
-            // Gateway echoes may repeat an optimistic event. Do not dedupe forever:
-            // a removal after a missed ADD or a plugin restart must still be recorded.
-            if (existing?.state === 'removed' && timestamp - existing.updatedAt < 5000) {
-                return false
-            }
+            // Until a matching ADD is observed, another REMOVE for this user/reaction
+            // is the same state transition and must not create a duplicate history entry.
+            if (existing?.state === 'removed') return false
 
             const eventId = 'remove:' + key + ':' + timestamp + ':' + (++eventSequence)
             const record: RemovalRecord = {
