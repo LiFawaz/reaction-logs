@@ -136,8 +136,8 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 })
         }
 
-        const recordRemoval = (payload: ReactionPayload, key: string) => {
-            const userId = getEventUserId(payload) ?? '*'
+        const recordRemoval = (payload: ReactionPayload, key: string, knownUserId?: string) => {
+            const userId = knownUserId ?? getEventUserId(payload) ?? '*'
             const users = removalLogs.get(key) ?? new Map<string, number>()
             users.set(userId, Date.now())
             removalLogs.set(key, users)
@@ -197,7 +197,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                     // allowed to update Discord, but must not create a second log.
                     if (payload.optimistic) {
                         pendingRemovalEchoes.add(token)
-                        recordRemoval(payload, key)
+                        recordRemoval(payload, key, userId)
                         persistState()
                         syncNative()
                         return payload
@@ -207,7 +207,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                         return payload
                     }
 
-                    recordRemoval(payload, key)
+                    recordRemoval(payload, key, userId)
                     persistState()
                     syncNative()
 
