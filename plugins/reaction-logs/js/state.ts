@@ -7,6 +7,7 @@ import type {
 
 export const REMOVAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 export const MAX_REMOVAL_RECORDS = 1000
+export const MAX_ACTIVE_REACTIONS = 5000
 
 type ReactionIdentity = Omit<ActiveReaction, 'reactionType'> & {
     reactionType: number
@@ -126,6 +127,7 @@ function legacyEmojiIdentity(value: string): string | null {
 function migrateLegacyEntries(
     entries: unknown,
     into: Map<string, RemovalRecord>,
+    migratedAt: number,
 ): void {
     if (!Array.isArray(entries)) return
 
@@ -157,7 +159,7 @@ function migrateLegacyEntries(
                 emojiName: emojiKey.startsWith('unicode:') ? emojiKey.slice(8) : null,
                 emojiKey,
                 reactionType: type,
-                timestamp: null,
+                timestamp: migratedAt,
                 epoch: 0,
                 identityKey,
             })
@@ -193,7 +195,7 @@ export function normalizeReactionStorage(
         }
     }
 
-    migrateLegacyEntries(input?.activeRemovals, history)
+    migrateLegacyEntries(input?.activeRemovals, history, now)
 
     const cutoff = now - REMOVAL_RETENTION_MS
     const retained = [...history.values()]
@@ -250,7 +252,7 @@ export function normalizeReactionStorage(
     return {
         schemaVersion: 2,
         removalHistory: retained,
-        activeReactions: [...active.values()],
+        activeReactions: [...active.values()].slice(-MAX_ACTIVE_REACTIONS),
         epochs,
     }
 }
