@@ -264,18 +264,6 @@ internal class ReactionLogHooks(
     private fun isRemoved(key: String): Boolean =
         synchronized(removedUsersByKey) { key in removedUsersByKey }
 
-    private fun removedUsersForMessage(messageId: String): Set<String> =
-        synchronized(removedUsersByKey) {
-            removedUsersByKey.entries
-                .asSequence()
-                .filter { it.key.startsWith("$messageId|") }
-                .flatMap { it.value.asSequence() }
-                .toSet()
-        }
-
-    private fun isRemovedUser(messageId: String, userId: String): Boolean =
-        userId in removedUsersForMessage(messageId)
-
     /**
      * Keep removed reaction pills visible by retaining and reattaching their real
      * rendered views after Discord rebuilds the reaction row.
