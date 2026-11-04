@@ -34,7 +34,7 @@ private const val MANAGE_REACTIONS_MODEL_PROVIDER =
 private const val MANAGE_REACTIONS_WIDGET =
     "com.discord.widgets.chat.managereactions.WidgetManageReactions"
 private const val REACTION_USER_ITEM =
-    "com.discord.widgets.chat.managereactions.ManageReactionsResultsAdapter$ReactionUserItem"
+    "com.discord.widgets.chat.managereactions.ManageReactionsResultsAdapter\$ReactionUserItem"
 private const val MG_RECYCLER_VIEW_HOLDER =
     "com.discord.utilities.mg_recycler.MGRecyclerViewHolder"
 
@@ -522,14 +522,12 @@ internal class ReactionLogHooks(
         }
 
         val currentActiveIds = activeForSelection.mapTo(LinkedHashSet()) { it.userId }
-        val newlyAdded = LinkedHashSet<String>()
         for (active in activeForSelection) {
             if (!existingUsers.add(active.userId)) continue
             val user = resolveUser(loader, active.userId) ?: continue
             val member = guildId?.let { resolveGuildMember(loader, it, active.userId) }
             createReactionUserItem(loader, user, channelLong, messageLong, emoji, member)?.let {
                 output.add(it)
-                newlyAdded.add(active.userId)
             }
         }
 
