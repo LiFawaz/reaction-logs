@@ -381,6 +381,7 @@ internal class ReactionLogHooks(
                 val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
                 val messageId = bindingMessageId.get()
                 val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
+                val currentKeys = LinkedHashSet<String>()
 
                 for (index in 0 until flexbox.childCount) {
                     val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
@@ -400,6 +401,7 @@ internal class ReactionLogHooks(
                     }
 
                     val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
+                    currentKeys.add(key)
                     boundPills[pillView] = key
                     applyPillStyle(pillView, isRemoved(key))
                 }
