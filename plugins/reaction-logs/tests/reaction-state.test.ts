@@ -59,7 +59,7 @@ describe('Reaction Logs event state', () => {
             'unicode:laugh',
             'unicode:star',
         ])
-        expect(buildNativeSnapshot(current).activeRemovals).toEqual([
+        expect(buildNativeSnapshot(current, 4).activeRemovals).toEqual([
             { pillKey: 'message-1|unicode:heart|0', removedUsers: [{ id: 'user-1' }] },
         ])
     })
