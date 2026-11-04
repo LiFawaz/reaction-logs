@@ -249,9 +249,9 @@ internal class ReactionLogHooks(
         if (removed.isEmpty()) return model
 
         val selectedIsModelEmoji = modelEmojiKey == emojiKey
-        val emoji = if (selectedIsModelEmoji) modelEmoji else synchronized(knownEmojiObjects) {
+        val emoji = (if (selectedIsModelEmoji) modelEmoji else synchronized(knownEmojiObjects) {
             knownEmojiObjects["$messageId|$emojiKey"]
-        } ?: return model
+        }) ?: return model
 
         val activeItems = if (selectedIsModelEmoji) currentUserItems else emptyList()
         val activeUserIds = activeItems.mapNotNull(::extractUserId).toMutableSet()
