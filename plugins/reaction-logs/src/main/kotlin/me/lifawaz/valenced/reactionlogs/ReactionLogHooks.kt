@@ -615,9 +615,10 @@ internal class ReactionLogHooks(
         configure.isAccessible = true
 
         unhooks += configure.hook(after = { param ->
-            val messageId = detailsMessageId ?: return@hook
             val holder = param.thisObject
             val data = param.args.getOrNull(1) ?: return@hook
+            val messageId = invokeGetter(data, "getMessageId")?.toString()
+                ?: detailsMessageId ?: return@hook
             val holderName = holder.javaClass.name
             val dataName = data.javaClass.name
 
