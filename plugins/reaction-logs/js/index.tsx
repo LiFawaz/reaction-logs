@@ -217,9 +217,12 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         ) => {
             const key = stateKey(identity.reactionKey, userId)
             const existing = states.get(key)
-            // Until a matching ADD is observed, another REMOVE for this user/reaction
-            // is the same state transition and must not create a duplicate history entry.
-            if (existing?.state === 'removed') return false
+            // Suppress the optimistic/gateway echo pair, but not future legitimate
+            // removals after a re-add event was missed while the plugin was unloaded.
+            // A matching ADD always resets the state and lets the next REMOVE through.
+            if (existing?.state === 'removed' && timestamp - existing.updatedAt < 5000) {
+                return false
+            }
 
             const eventId = 'remove:' + key + ':' + timestamp + ':' + (++eventSequence)
             const record: RemovalRecord = {
