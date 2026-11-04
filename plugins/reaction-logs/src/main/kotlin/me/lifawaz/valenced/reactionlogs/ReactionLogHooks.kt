@@ -534,21 +534,9 @@ internal class ReactionLogHooks(
         }
 
         val currentActiveIds = activeForSelection.mapTo(LinkedHashSet()) { it.userId }
-        val historyUserIds = historyForSelection
-            .mapTo(LinkedHashSet()) { it.userId }
-            .filterTo(LinkedHashSet()) { it !in currentActiveIds }
-
-        // A stale model can briefly still contain a just-removed reactor while
-        // Discord's store emission is in flight. Remove that exact row and append
-        // it again in the removed section so it receives the red state.
-        val filteredItems = originalItems.filterNot { row ->
-            row != null &&
-                row.javaClass.name.contains("ReactionUserItem", ignoreCase = true) &&
-                extractUserId(row) in historyUserIds
-        }
-        val existingUsers = filteredItems.mapNotNull(::extractUserId).toMutableSet()
-        val output = ArrayList<Any>(filteredItems.size + 8)
-        filteredItems.filterNotNullTo(output)
+        val existingUsers = originalItems.mapNotNull(::extractUserId).toMutableSet()
+        val output = ArrayList<Any>(originalItems.size + 8)
+        originalItems.filterNotNullTo(output)
 
         for (active in activeForSelection) {
             if (!existingUsers.add(active.userId)) continue
@@ -561,7 +549,14 @@ internal class ReactionLogHooks(
 
         val removedIds = LinkedHashSet<String>()
         for (entry in historyForSelection) {
-            if (entry.userId in existingUsers || entry.userId in currentActiveIds) continue
+            if (entry.userId in currentActiveIds) continue
+            // Keep and mark an existing real Discord row when available. This also
+            // covers a temporarily unresolved StoreUser cache entry without dropping
+            // the profile already present in the current popup model.
+            if (entry.userId in existingUsers) {
+                removedIds.add(entry.userId)
+                continue
+            }
             val user = resolveUser(loader, entry.userId) ?: continue
             val member = guildId?.let { resolveGuildMember(loader, it, entry.userId) }
             val row = createReactionUserItem(loader, user, channelLong, messageLong, emoji, member)
