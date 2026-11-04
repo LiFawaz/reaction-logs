@@ -314,7 +314,13 @@ internal class ReactionLogHooks(
             it.name == "copy" && it.parameterCount == 3
         }
         if (copy != null) {
-            runCatching { copy.invoke(original, 0, emoji, 0) }.getOrNull()?.let { return it }
+            val types = copy.parameterTypes
+            if ((types[0] == Int::class.javaPrimitiveType || types[0] == Int::class.java) &&
+                types[1].isInstance(emoji)) {
+                runCatching {
+                    copy.invoke(original, 0, emoji, defaultValue(types[2]))
+                }.getOrNull()?.let { return it }
+            }
         }
 
         val constructor = original.javaClass.declaredConstructors.firstOrNull { candidate ->
@@ -322,11 +328,14 @@ internal class ReactionLogHooks(
             types.size == 3 &&
                 (types[0] == Int::class.javaPrimitiveType || types[0] == Int::class.java) &&
                 types[1].isInstance(emoji) &&
-                (types[2] == Int::class.javaPrimitiveType || types[2] == Int::class.java)
+                (types[2] == Int::class.javaPrimitiveType ||
+                    types[2] == Int::class.java ||
+                    types[2] == Boolean::class.javaPrimitiveType ||
+                    types[2] == Boolean::class.java)
         } ?: return null
         return runCatching {
             constructor.isAccessible = true
-            constructor.newInstance(0, emoji, false)
+            constructor.newInstance(0, emoji, defaultValue(constructor.parameterTypes[2]))
         }.onFailure {
             XposedBridge.log("Reaction Logs: could not create zero-count historical reaction: $it")
         }.getOrNull()
