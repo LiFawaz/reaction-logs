@@ -392,8 +392,8 @@ export function applyBulkMessageDelete(
     return normalizeReactionStorage(state, now)
 }
 
-export function buildNativeSnapshot(state: ReactionStorage) {
-    const normalized = normalizeReactionStorage(state)
+export function buildNativeSnapshot(state: ReactionStorage, now = Date.now()) {
+    const normalized = normalizeReactionStorage(state, now)
     const activeKeys = new Set(normalized.activeReactions.map(activeReactionKey))
     const grouped = new Map<string, Set<string>>()
 
