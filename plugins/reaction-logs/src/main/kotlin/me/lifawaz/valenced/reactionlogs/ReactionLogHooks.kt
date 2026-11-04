@@ -79,8 +79,6 @@ internal class ReactionLogHooks(
     private var lastPopupWidget: WeakReference<Any>? = null
     private var lastPopupModel: Any? = null
     private var configurePopupMethod: Method? = null
-    // Keep the actual rendered pill view when Discord drops its final reaction model.
-    private val retainedPillViews = LinkedHashMap<String, LinearLayout>()
     private val boundPills = WeakHashMap<LinearLayout, String>()
     private val originalPillStyles = WeakHashMap<LinearLayout, OriginalPillStyle>()
     private val userRows = WeakHashMap<View, UserRowBinding>()
@@ -185,21 +183,7 @@ internal class ReactionLogHooks(
             activeReactions.addAll(parsedActive)
         }
 
-        val staleRetainedViews = synchronized(retainedPillViews) {
-            val stale = retainedPillViews
-                .filterKeys { it !in parsedMarkers.keys }
-                .values
-                .toList()
-            retainedPillViews.keys.retainAll(parsedMarkers.keys)
-            stale
-        }
-
         mainHandler.post {
-            staleRetainedViews.forEach { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
-                boundPills.remove(view)
-                applyPillStyle(view, false)
-            }
             for ((pill, key) in boundPills.entries.toList()) {
                 applyPillStyle(pill, isRemoved(key))
             }
@@ -224,15 +208,7 @@ internal class ReactionLogHooks(
         synchronized(removalHistory) { removalHistory.clear() }
         synchronized(activeReactions) { activeReactions.clear() }
         synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
-        val retained = synchronized(retainedPillViews) {
-            retainedPillViews.values.toList().also { retainedPillViews.clear() }
-        }
         mainHandler.post {
-            retained.forEach { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
-                boundPills.remove(view)
-                applyPillStyle(view, false)
-            }
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
             }
@@ -246,9 +222,8 @@ internal class ReactionLogHooks(
         unhooks.forEach { it.unhook() }
         unhooks.clear()
         synchronized(removedUsersByKey) { removedUsersByKey.clear() }
-        val retained = synchronized(retainedPillViews) {
-            retainedPillViews.values.toList().also { retainedPillViews.clear() }
-        }
+        synchronized(removalHistory) { removalHistory.clear() }
+        synchronized(activeReactions) { activeReactions.clear() }
         detailsMessageId = null
         detailsChannelId = null
         detailsEmojiKey = null
@@ -257,11 +232,6 @@ internal class ReactionLogHooks(
         configurePopupMethod = null
         synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
         mainHandler.post {
-            retained.forEach { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
-                boundPills.remove(view)
-                applyPillStyle(view, false)
-            }
             for (pill in boundPills.keys.toList()) {
                 applyPillStyle(pill, false)
             }
@@ -362,75 +332,33 @@ internal class ReactionLogHooks(
         )
 
         unhooks += setReactions.hook(
-            before = { param ->
-                val messageId = bindingMessageId.get() ?: return@hook
-                val flexbox = param.thisObject as? ViewGroup ?: return@hook
+            after = { param ->
+                val flexbox = param.thisObject as ViewGroup
+                val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
+                val messageId = bindingMessageId.get()
+                val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
 
-                // Save the real pill view before Discord rebuilds this row. A proxy
-                // reaction model is not reliable because Discord may filter it out.
                 for (index in 0 until flexbox.childCount) {
                     val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
-                    val key = boundPills[pillView] ?: continue
-                    if (key.startsWith("$messageId|") && isRemoved(key)) {
-                        synchronized(retainedPillViews) {
-                            retainedPillViews[key] = pillView
-                        }
+                    val pill = reactionPills.getOrNull(index)
+
+                    if (pill == null || messageId == null || pill.count <= 0 || pill.emoji == null) {
+                        boundPills.remove(pillView)
+                        applyPillStyle(pillView, false)
+                        continue
                     }
-                }
-            },
-            after = { param ->
-            val flexbox = param.thisObject as ViewGroup
-            val reactions = param.args.getOrNull(0) as? List<*> ?: emptyList<Any>()
-            val messageId = bindingMessageId.get()
-            val reactionPills = pills(reactions, getCount, getBurstCount, getEmoji)
-            val currentKeys = LinkedHashSet<String>()
 
-            for (index in 0 until flexbox.childCount) {
-                val pillView = flexbox.getChildAt(index) as? LinearLayout ?: continue
-                val pill = reactionPills.getOrNull(index)
-
-                if (pill == null || messageId == null || pill.count <= 0 || pill.emoji == null) {
-                    boundPills.remove(pillView)
-                    applyPillStyle(pillView, false)
-                    continue
-                }
-
-                val emoji = emojiKey(pill.emoji)
-                if (emoji.isNullOrBlank()) {
-                    boundPills.remove(pillView)
-                    applyPillStyle(pillView, false)
-                    continue
-                }
-
-                val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
-                currentKeys.add(key)
-                boundPills[pillView] = key
-                applyPillStyle(pillView, isRemoved(key))
-            }
-
-            // Reattach any removed pill whose reaction model disappeared from
-            // Discord's list. It remains visible and red until the matching add
-            // event clears this key from the active-removal state.
-            if (messageId != null) {
-                val prefix = "$messageId|"
-                val retained = synchronized(retainedPillViews) {
-                    retainedPillViews.entries
-                        .filter { it.key.startsWith(prefix) && isRemoved(it.key) }
-                        .map { it.key to it.value }
-                }
-
-                for ((key, pillView) in retained) {
-                    if (key in currentKeys) continue
-                    if (pillView.parent !== flexbox) {
-                        (pillView.parent as? ViewGroup)?.removeView(pillView)
-                        runCatching { flexbox.addView(pillView) }.onFailure {
-                            XposedBridge.log("Reaction Logs: could not retain removed pill: $it")
-                        }
+                    val emoji = emojiKey(pill.emoji)
+                    if (emoji.isNullOrBlank()) {
+                        boundPills.remove(pillView)
+                        applyPillStyle(pillView, false)
+                        continue
                     }
+
+                    val key = reactionKey(messageId, emoji, if (pill.burst) 1 else 0)
                     boundPills[pillView] = key
-                    applyPillStyle(pillView, true)
+                    applyPillStyle(pillView, isRemoved(key))
                 }
-            }
             },
         )
     }
@@ -492,6 +420,8 @@ internal class ReactionLogHooks(
      * its real User, avatar, display name and profile-click behavior.
      */
     private fun augmentReactionPopup(widget: Any, model: Any, loader: ClassLoader): Any {
+        synchronized(popupRemovedUsers) { popupRemovedUsers.clear() }
+        refreshUserRows()
         val provider = readMember(widget, "modelProvider") ?: return model
         val channelId = readMember(provider, "channelId")?.toString() ?: return model
         val messageId = readMember(provider, "messageId")?.toString() ?: return model
