@@ -52,6 +52,7 @@ internal class ReactionLogHooks(
 
     private val removedUsersByKey = LinkedHashMap<String, MutableMap<String, RemovedUser>>()
     private val knownEmojiObjects = LinkedHashMap<String, Any>()
+    private val selectedEmojiByProvider = WeakHashMap<Any, String>()
     // Keep the actual rendered pill view when Discord drops its final reaction model.
     private val retainedPillViews = LinkedHashMap<String, LinearLayout>()
     private val boundPills = WeakHashMap<LinearLayout, String>()
@@ -391,6 +392,7 @@ internal class ReactionLogHooks(
     }
 
     private fun targetedEmojiKey(provider: Any): String? {
+        selectedEmojiByProvider[provider]?.let { return it }
         var current: Class<*>? = provider.javaClass
         while (current != null) {
             val field = current.declaredFields.firstOrNull {
@@ -401,8 +403,30 @@ internal class ReactionLogHooks(
                     field.isAccessible = true
                     val subject = field.get(provider) ?: return@runCatching null
                     invokeGetter(subject, "getValue")?.toString()
+                        ?: nestedSubjectValue(subject, 0)
                 }.getOrNull()
                 if (!raw.isNullOrBlank()) return normalizeTargetEmojiKey(raw)
+            }
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun nestedSubjectValue(value: Any, depth: Int): String? {
+        if (depth > 2) return null
+        var current: Class<*>? = value.javaClass
+        while (current != null) {
+            for (field in current.declaredFields) {
+                if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+                if (!field.name.contains("actual", ignoreCase = true) &&
+                    !field.name.contains("subject", ignoreCase = true)) continue
+                val nested = runCatching {
+                    field.isAccessible = true
+                    field.get(value)
+                }.getOrNull() ?: continue
+                val direct = invokeGetter(nested, "getValue")?.toString()
+                if (!direct.isNullOrBlank()) return direct
+                nestedSubjectValue(nested, depth + 1)?.let { return it }
             }
             current = current.superclass
         }
@@ -524,7 +548,13 @@ internal class ReactionLogHooks(
                     val emoji = pill.emoji ?: continue
                     val key = emojiKey(emoji) ?: continue
                     synchronized(knownEmojiObjects) {
-                        knownEmojiObjects["$messageId|$key"] = emoji
+                        val cacheKey = "$messageId|$key"
+                        knownEmojiObjects.remove(cacheKey)
+                        knownEmojiObjects[cacheKey] = emoji
+                        while (knownEmojiObjects.size > 2000) {
+                            val oldest = knownEmojiObjects.keys.firstOrNull() ?: break
+                            knownEmojiObjects.remove(oldest)
+                        }
                     }
                 }
             }
@@ -573,6 +603,8 @@ internal class ReactionLogHooks(
                         }
                     }
                     boundPills[pillView] = key
+                    // This is a historical pill, not an active reaction count.
+                    setPillCount(pillView, "0")
                     applyPillStyle(pillView, true)
                 }
             }
@@ -604,6 +636,16 @@ internal class ReactionLogHooks(
                 param.result = wrapManageReactionsObservable(param.thisObject, observable)
             },
         )
+        providerClass.methods.firstOrNull {
+            it.name == "onEmojiTargeted" && it.parameterCount == 1
+        }?.let { onEmojiTargeted ->
+            unhooks += onEmojiTargeted.hook(after = { param ->
+                val raw = param.args.firstOrNull()?.toString()
+                if (!raw.isNullOrBlank()) {
+                    selectedEmojiByProvider[param.thisObject] = normalizeTargetEmojiKey(raw)
+                }
+            })
+        }
 
         val holderBase = dexFinder.classLoader.loadClass(MG_RECYCLER_VIEW_HOLDER)
         val configure = holderBase.declaredMethods.firstOrNull {
@@ -782,6 +824,10 @@ internal class ReactionLogHooks(
             view.backgroundTintList = original.backgroundTint
             original.countColors?.let { count?.setTextColor(it) }
         }
+    }
+
+    private fun setPillCount(view: ViewGroup, value: String) {
+        countText(view)?.text = value
     }
 
     private fun countText(view: ViewGroup): TextView? {
