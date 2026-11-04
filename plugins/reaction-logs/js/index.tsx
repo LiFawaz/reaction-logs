@@ -59,8 +59,6 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
         const removalLogs = new Map<string, RemovedUsers>()
         const retainedPillKeys = new Set<string>()
 
-        const cache = jsonStorage.cache ?? DefaultStorage
-
         // Session-only state: do not restore previous runs after a full app restart.
         // Events are persisted while this process is alive, but the next app start
         // begins with an empty log.
