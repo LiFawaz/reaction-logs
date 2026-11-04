@@ -51,6 +51,7 @@ internal class ReactionLogHooks(
         val countColors: ColorStateList?,
     )
     private data class UserRowBinding(
+        val guildId: String?,
         val channelId: String,
         val messageId: String,
         val emojiKey: String,
@@ -80,6 +81,7 @@ internal class ReactionLogHooks(
     private val removalHistory = LinkedHashMap<String, RemovalEntry>()
     private val activeReactions = LinkedHashSet<ActiveEntry>()
     private val popupRemovedUsers = LinkedHashSet<String>()
+    @Volatile private var detailsGuildId: String? = null
     @Volatile private var detailsChannelId: String? = null
     @Volatile private var detailsEmojiKey: String? = null
     @Volatile private var detailsReactionType: Int = 0
@@ -235,6 +237,7 @@ internal class ReactionLogHooks(
         synchronized(removalHistory) { removalHistory.clear() }
         synchronized(activeReactions) { activeReactions.clear() }
         detailsMessageId = null
+        detailsGuildId = null
         detailsChannelId = null
         detailsEmojiKey = null
         detailsReactionType = 0
@@ -448,6 +451,7 @@ internal class ReactionLogHooks(
         val messageLong = messageId.toLongOrNull() ?: return model
         val guildId = resolveGuildId(loader, channelLong)
 
+        detailsGuildId = guildId
         detailsChannelId = channelId
         detailsMessageId = messageId
         detailsEmojiKey = selectedEmojiKey
@@ -464,7 +468,7 @@ internal class ReactionLogHooks(
                     (active.guildId.isNullOrBlank() || guildId.isNullOrBlank() || active.guildId == guildId)
             }.toList()
         }
-        val selectionRetryKey = userRowKey(channelId, messageId, selectedEmojiKey, selectedReactionType, "")
+        val selectionRetryKey = userRowKey(guildId, channelId, messageId, selectedEmojiKey, selectedReactionType, "")
         if (popupRetryKey != selectionRetryKey) {
             cancelPopupRetry()
             popupRetryKey = selectionRetryKey
@@ -524,7 +528,7 @@ internal class ReactionLogHooks(
         synchronized(popupRemovedUsers) {
             popupRemovedUsers.clear()
             removedIds.forEach { userId ->
-                popupRemovedUsers.add(userRowKey(channelId, messageId, selectedEmojiKey, selectedReactionType, userId))
+                popupRemovedUsers.add(userRowKey(guildId, channelId, messageId, selectedEmojiKey, selectedReactionType, userId))
             }
         }
         refreshUserRows()
@@ -637,6 +641,7 @@ internal class ReactionLogHooks(
     }.getOrNull()
 
     private fun bindUserRow(view: View, messageId: String, userId: String) {
+        val guildId = detailsGuildId
         val channelId = detailsChannelId ?: return
         val emojiKey = detailsEmojiKey ?: return
         if (detailsMessageId != messageId) return
@@ -644,12 +649,12 @@ internal class ReactionLogHooks(
         // RecyclerView reuses holders between emoji tabs; restore the previous row's
         // original styling before assigning this holder a different reaction identity.
         applyUserRowStyle(view, false)
-        val binding = UserRowBinding(channelId, messageId, emojiKey, reactionType, userId)
+        val binding = UserRowBinding(guildId, channelId, messageId, emojiKey, reactionType, userId)
         userRows[view] = binding
         mainHandler.post {
             if (userRows[view] != binding) return@post
             val highlighted = synchronized(popupRemovedUsers) {
-                userRowKey(binding.channelId, binding.messageId, binding.emojiKey, binding.reactionType, binding.userId) in popupRemovedUsers
+                userRowKey(binding.guildId, binding.channelId, binding.messageId, binding.emojiKey, binding.reactionType, binding.userId) in popupRemovedUsers
             }
             applyUserRowStyle(view, highlighted)
         }
@@ -866,8 +871,8 @@ internal class ReactionLogHooks(
 private fun reactionKey(messageId: String, emojiKey: String, type: Int) =
     "$messageId|$emojiKey|$type"
 
-private fun userRowKey(channelId: String, messageId: String, emojiKey: String, type: Int, userId: String) =
-    listOf(channelId, messageId, emojiKey, type.toString(), userId).joinToString("\u0000")
+private fun userRowKey(guildId: String?, channelId: String, messageId: String, emojiKey: String, type: Int, userId: String) =
+    listOf(guildId.orEmpty(), channelId, messageId, emojiKey, type.toString(), userId).joinToString("\u0000")
 
 private inline fun Method.hook(
     crossinline before: (XC_MethodHook.MethodHookParam) -> Unit = {},
