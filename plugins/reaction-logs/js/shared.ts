@@ -8,6 +8,7 @@ export interface RemovalLogEntry {
 }
 
 export interface ReactionStorage {
+    sessionId?: string
     removalLogs?: RemovalLogEntry[]
     retainedPillKeys?: string[]
 }
