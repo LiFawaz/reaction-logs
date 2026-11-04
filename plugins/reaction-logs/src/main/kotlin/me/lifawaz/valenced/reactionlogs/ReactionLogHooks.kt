@@ -33,7 +33,7 @@ internal class ReactionLogHooks(
     dexFinder: DexFinder,
     @Suppress("UNUSED_PARAMETER") bridge: ValencedBridge,
 ) {
-    private data class Pill(val emoji: Any?, val burst: Boolean, val count: Int)
+    private data class Pill(val reaction: Any?, val emoji: Any?, val burst: Boolean, val count: Int)
     private data class OriginalPillStyle(
         val backgroundTint: ColorStateList?,
         val countColors: ColorStateList?,
@@ -52,6 +52,7 @@ internal class ReactionLogHooks(
 
     private val removedUsersByKey = LinkedHashMap<String, MutableMap<String, RemovedUser>>()
     private val knownEmojiObjects = LinkedHashMap<String, Any>()
+    private val knownReactionObjects = LinkedHashMap<String, Any>()
     private val selectedEmojiByProvider = WeakHashMap<Any, String>()
     // Keep the actual rendered pill view when Discord drops its final reaction model.
     private val retainedPillViews = LinkedHashMap<String, LinearLayout>()
@@ -225,48 +226,143 @@ internal class ReactionLogHooks(
         val currentUserItems = (invokeGetter(model, "getUserItems") as? List<*>)?.toList()
             ?: emptyList()
 
-        var selectedEmoji: Any? = null
-        var selectedEmojiKey: String? = null
+        val targetEmojiKey = targetedEmojiKey(provider)
+        var modelEmoji: Any? = null
+        var modelEmojiKey: String? = null
         for (item in reactionItems) {
             val selected = invokeGetter(item, "isSelected", "getIsSelected") as? Boolean ?: false
             if (!selected) continue
             val reaction = invokeGetter(item, "getReaction")
-            selectedEmoji = invokeGetter(reaction, "getEmoji")
-            selectedEmojiKey = selectedEmoji?.let(::emojiKey)
-            if (selectedEmojiKey != null) break
+            modelEmoji = invokeGetter(reaction, "getEmoji")
+            modelEmojiKey = modelEmoji?.let(::emojiKey)
+            if (modelEmojiKey != null) break
         }
 
-        if (selectedEmojiKey == null) {
-            selectedEmojiKey = targetedEmojiKey(provider)
-            if (selectedEmojiKey != null) {
-                selectedEmoji = synchronized(knownEmojiObjects) {
-                    knownEmojiObjects["$messageId|$selectedEmojiKey"]
-                }
-            }
-        }
+        // Discord falls back to the first active emoji when the requested emoji has
+        // no active reactors. Prefer the exact targeted emoji whenever we have removal
+        // history for it, otherwise rows from a different tab could be mislabeled.
+        val targetHasHistory = targetEmojiKey != null &&
+            removedUsersFor(messageId, targetEmojiKey).isNotEmpty()
+        val selectedEmojiKey = if (targetHasHistory) targetEmojiKey else modelEmojiKey ?: targetEmojiKey
         val emojiKey = selectedEmojiKey ?: return model
-        val emoji = selectedEmoji ?: synchronized(knownEmojiObjects) {
-            knownEmojiObjects["$messageId|$emojiKey"]
-        } ?: return model
-
         val removed = removedUsersFor(messageId, emojiKey)
         if (removed.isEmpty()) return model
 
-        val activeUserIds = currentUserItems.mapNotNull(::extractUserId).toMutableSet()
-        val mergedItems = currentUserItems.toMutableList()
+        val selectedIsModelEmoji = modelEmojiKey == emojiKey
+        val emoji = if (selectedIsModelEmoji) modelEmoji else synchronized(knownEmojiObjects) {
+            knownEmojiObjects["$messageId|$emojiKey"]
+        } ?: return model
+
+        val activeItems = if (selectedIsModelEmoji) currentUserItems else emptyList()
+        val activeUserIds = activeItems.mapNotNull(::extractUserId).toMutableSet()
+        val mergedUserItems = activeItems.toMutableList()
         for (user in removed) {
             // A re-added reaction is active and must not be duplicated as a red history row.
             if (user.userId in activeUserIds) continue
             val item = createReactionUserItem(provider, user, channelId, messageId, emoji)
             if (item != null) {
-                mergedItems.add(item)
+                mergedUserItems.add(item)
                 activeUserIds.add(user.userId)
             }
         }
-        if (mergedItems.size == currentUserItems.size) return model
 
-        return createManageReactionsModel(provider, model, reactionItems, mergedItems)
+        val mergedReactionItems = mergeReactionEmojiItems(
+            provider,
+            messageId,
+            emojiKey,
+            emoji,
+            reactionItems,
+        ) ?: return model
+        if (mergedUserItems.size == currentUserItems.size &&
+            mergedReactionItems == reactionItems) return model
+
+        return createManageReactionsModel(provider, model, mergedReactionItems, mergedUserItems)
             ?: model
+    }
+
+    private fun mergeReactionEmojiItems(
+        provider: Any,
+        messageId: String,
+        selectedEmojiKey: String,
+        selectedEmoji: Any,
+        existingItems: List<*>,
+    ): List<Any?>? {
+        val merged = mutableListOf<Any?>()
+        var foundSelected = false
+        for (item in existingItems) {
+            val reaction = invokeGetter(item, "getReaction") ?: continue
+            val emoji = invokeGetter(reaction, "getEmoji")
+            val key = emoji?.let(::emojiKey)
+            val isSelected = key == selectedEmojiKey
+            if (isSelected) foundSelected = true
+            val copy = createReactionEmojiItem(provider, item, reaction, isSelected)
+            merged.add(copy ?: item)
+        }
+
+        if (foundSelected) return merged
+        val originalReaction = synchronized(knownReactionObjects) {
+            knownReactionObjects["$messageId|$selectedEmojiKey"]
+        } ?: return null
+        val zeroReaction = createZeroCountReaction(originalReaction, selectedEmoji) ?: return null
+        val item = createReactionEmojiItem(provider, null, zeroReaction, true) ?: return null
+        merged.add(item)
+        return merged
+    }
+
+    private fun createZeroCountReaction(original: Any, emoji: Any): Any? {
+        val copy = original.javaClass.methods.firstOrNull {
+            it.name == "copy" && it.parameterCount == 3
+        }
+        if (copy != null) {
+            runCatching { copy.invoke(original, 0, emoji, false) }.getOrNull()?.let { return it }
+        }
+
+        val constructor = original.javaClass.declaredConstructors.firstOrNull { candidate ->
+            val types = candidate.parameterTypes
+            types.size == 3 &&
+                (types[0] == Int::class.javaPrimitiveType || types[0] == Int::class.java) &&
+                types[1].isInstance(emoji) &&
+                (types[2] == Boolean::class.javaPrimitiveType || types[2] == Boolean::class.java)
+        } ?: return null
+        return runCatching {
+            constructor.isAccessible = true
+            constructor.newInstance(0, emoji, false)
+        }.onFailure {
+            XposedBridge.log("Reaction Logs: could not create zero-count historical reaction: $it")
+        }.getOrNull()
+    }
+
+    private fun createReactionEmojiItem(
+        provider: Any,
+        existingItem: Any?,
+        reaction: Any,
+        selected: Boolean,
+    ): Any? {
+        val loader = provider.javaClass.classLoader
+        val itemClass = existingItem?.javaClass ?: runCatching {
+            loader.loadClass(
+                "com.discord.widgets.chat.managereactions.ManageReactionsEmojisAdapter\$ReactionEmojiItem",
+            )
+        }.getOrNull() ?: return null
+
+        if (existingItem != null) {
+            val copy = itemClass.methods.firstOrNull {
+                it.name == "copy" && it.parameterCount == 2
+            }
+            if (copy != null) {
+                runCatching { copy.invoke(existingItem, reaction, selected) }.getOrNull()?.let { return it }
+            }
+        }
+
+        val constructor = itemClass.declaredConstructors.firstOrNull { candidate ->
+            val types = candidate.parameterTypes
+            types.size == 2 && types[0].isInstance(reaction) &&
+                (types[1] == Boolean::class.javaPrimitiveType || types[1] == Boolean::class.java)
+        } ?: return null
+        return runCatching {
+            constructor.isAccessible = true
+            constructor.newInstance(reaction, selected)
+        }.getOrNull()
     }
 
     private fun createManageReactionsModel(
@@ -546,14 +642,18 @@ internal class ReactionLogHooks(
             if (messageId != null) {
                 for (pill in reactionPills) {
                     val emoji = pill.emoji ?: continue
+                    val reaction = pill.reaction ?: continue
                     val key = emojiKey(emoji) ?: continue
                     synchronized(knownEmojiObjects) {
                         val cacheKey = "$messageId|$key"
                         knownEmojiObjects.remove(cacheKey)
                         knownEmojiObjects[cacheKey] = emoji
+                        knownReactionObjects.remove(cacheKey)
+                        knownReactionObjects[cacheKey] = reaction
                         while (knownEmojiObjects.size > 2000) {
                             val oldest = knownEmojiObjects.keys.firstOrNull() ?: break
                             knownEmojiObjects.remove(oldest)
+                            knownReactionObjects.remove(oldest)
                         }
                     }
                 }
@@ -849,9 +949,12 @@ internal class ReactionLogHooks(
         val burstCount = getBurstCount.invoke(reaction) as Int
         val emoji = getEmoji.invoke(reaction)
         when {
-            burstCount > 0 && count > 0 -> listOf(Pill(emoji, true, burstCount), Pill(emoji, false, count))
-            burstCount > 0 -> listOf(Pill(emoji, true, burstCount))
-            count > 0 -> listOf(Pill(emoji, false, count))
+            burstCount > 0 && count > 0 -> listOf(
+                Pill(reaction, emoji, true, burstCount),
+                Pill(reaction, emoji, false, count),
+            )
+            burstCount > 0 -> listOf(Pill(reaction, emoji, true, burstCount))
+            count > 0 -> listOf(Pill(reaction, emoji, false, count))
             else -> emptyList()
         }
     }
