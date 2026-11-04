@@ -197,13 +197,14 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             type: BulkRemovalRecord['type'],
             identity: ReturnType<typeof makeIdentity>,
             timestamp = Date.now(),
+            payload?: ReactionPayload,
         ) => {
             bulkEvents.push({
                 eventId: type + ':' + timestamp + ':' + (++eventSequence),
                 type,
-                messageId: identity?.messageId,
-                channelId: identity?.channelId,
-                guildId: identity?.guildId,
+                messageId: identity?.messageId ?? asString(payload?.messageId, payload?.message_id) ?? undefined,
+                channelId: identity?.channelId ?? asString(payload?.channelId, payload?.channel_id) ?? undefined,
+                guildId: identity?.guildId ?? asString(payload?.guildId, payload?.guild_id) ?? undefined,
                 emojiKey: identity?.emojiKey,
                 timestamp,
             })
@@ -282,7 +283,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             const identity = makeIdentity(payload)
             const userId = identity?.userId
             if (!identity || !userId) {
-                addBulkEvent('MESSAGE_REACTION_REMOVE', identity)
+                addBulkEvent('MESSAGE_REACTION_REMOVE', identity, Date.now(), payload)
                 persistState()
                 plugin.reportError('Reaction removal received without a reliable message, emoji, or affected user ID')
                 return
@@ -314,7 +315,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
             const identity = makeIdentity(payload)
             const messageId = identity?.messageId ?? asString(payload.messageId, payload.message_id)
             if (!messageId) {
-                addBulkEvent(type, identity)
+                addBulkEvent(type, identity, Date.now(), payload)
                 persistState()
                 return
             }
@@ -335,7 +336,7 @@ export default plugin<{ jsonStorage: ReactionStorage }>({
                 })
             }
 
-            addBulkEvent(type, identity, timestamp)
+            addBulkEvent(type, identity, timestamp, payload)
             persistState()
             syncNative()
         }
