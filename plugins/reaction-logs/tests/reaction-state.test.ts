@@ -42,6 +42,14 @@ describe('Reaction Logs event state', () => {
         })
     })
 
+    test('optional guild ID does not split the same reaction identity', () => {
+        let current = applyReactionAdd(state(), base({ guild_id: 'guild-1' }), 1)
+        current = applyReactionRemove(current, base({ guild_id: undefined }), 2)
+        expect(current.activeReactions).toHaveLength(0)
+        expect(current.removalHistory).toHaveLength(1)
+        expect(current.removalHistory[0].guildId).toBeNull()
+    })
+
     test('removing one user does not mark other users on the same emoji', () => {
         let current = applyReactionAdd(state(), base({ user_id: 'user-a' }), 1)
         current = applyReactionAdd(current, base({ user_id: 'user-b' }), 2)
@@ -230,7 +238,6 @@ describe('Reaction Logs event state', () => {
         )
         const epochs = Object.fromEntries(activeReactions.map((item, index) => [
             JSON.stringify([
-                item.guildId,
                 item.channelId,
                 item.messageId,
                 item.emojiKey,
