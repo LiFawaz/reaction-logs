@@ -492,17 +492,16 @@ internal class ReactionLogHooks(
     }
 
     private fun defaultValue(type: Class<*>): Any? = when (type) {
-        java.lang.Boolean.TYPE -> false
-        java.lang.Byte.TYPE -> 0.toByte()
-        java.lang.Short.TYPE -> 0.toShort()
-        java.lang.Integer.TYPE -> 0
-        java.lang.Long.TYPE -> 0L
-        java.lang.Float.TYPE -> 0f
-        java.lang.Double.TYPE -> 0.0
-        java.lang.Character.TYPE -> '\u0000'
+        java.lang.Boolean.TYPE, java.lang.Boolean::class.java -> false
+        java.lang.Byte.TYPE, java.lang.Byte::class.java -> 0.toByte()
+        java.lang.Short.TYPE, java.lang.Short::class.java -> 0.toShort()
+        java.lang.Integer.TYPE, java.lang.Integer::class.java -> 0
+        java.lang.Long.TYPE, java.lang.Long::class.java -> 0L
+        java.lang.Float.TYPE, java.lang.Float::class.java -> 0f
+        java.lang.Double.TYPE, java.lang.Double::class.java -> 0.0
+        java.lang.Character.TYPE, java.lang.Character::class.java -> '\u0000'
         else -> null
     }
-
     private fun targetedEmojiKey(provider: Any): String? {
         synchronized(selectedEmojiByProvider) {
             selectedEmojiByProvider[provider]?.let { return it }
