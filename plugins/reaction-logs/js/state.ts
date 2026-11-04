@@ -240,9 +240,10 @@ export function normalizeReactionStorage(
         epochs[item.identityKey] = Math.max(epochs[item.identityKey] ?? 0, item.epoch)
     }
 
-    // Keep the epoch map bounded and only for identities that still matter.
+    // Bound both the active cache and its epoch map to the same retained identities.
+    const boundedActive = [...active.values()].slice(-MAX_ACTIVE_REACTIONS)
     const liveIdentityKeys = new Set([
-        ...[...active.values()].map(activeReactionKey),
+        ...boundedActive.map(activeReactionKey),
         ...retained.map(item => item.identityKey),
     ])
     for (const key of Object.keys(epochs)) {
@@ -252,7 +253,7 @@ export function normalizeReactionStorage(
     return {
         schemaVersion: 2,
         removalHistory: retained,
-        activeReactions: [...active.values()].slice(-MAX_ACTIVE_REACTIONS),
+        activeReactions: boundedActive,
         epochs,
     }
 }
