@@ -8,6 +8,7 @@ import {
     applyRemoveEmoji,
     buildNativeSnapshot,
     normalizeReactionStorage,
+    MAX_ACTIVE_REACTIONS,
 } from '../js/state'
 import { DefaultStorage } from '../js/shared'
 import type { ReactionPayload, ReactionStorage } from '../js/shared'
@@ -198,4 +199,16 @@ describe('Reaction Logs event state', () => {
         }
         expect(current.removalHistory).toHaveLength(1000)
     })
+    test('active reaction cache and epoch map stay bounded', () => {
+        let current = state()
+        for (let index = 0; index < MAX_ACTIVE_REACTIONS + 10; index++) {
+            current = applyReactionAdd(current, base({
+                message_id: `active-message-${index}`,
+                user_id: `active-user-${index}`,
+            }), 1000 + index)
+        }
+        expect(current.activeReactions).toHaveLength(MAX_ACTIVE_REACTIONS)
+        expect(Object.keys(current.epochs)).toHaveLength(MAX_ACTIVE_REACTIONS)
+    })
+
 })
