@@ -662,7 +662,7 @@ internal class ReactionLogHooks(
 
     private fun refreshUserRows() {
         for ((view, binding) in userRows.entries.toList()) {
-            val key = userRowKey(binding.channelId, binding.messageId, binding.emojiKey, binding.reactionType, binding.userId)
+            val key = userRowKey(binding.guildId, binding.channelId, binding.messageId, binding.emojiKey, binding.reactionType, binding.userId)
             val highlighted = synchronized(popupRemovedUsers) { key in popupRemovedUsers }
             applyUserRowStyle(view, highlighted)
         }
