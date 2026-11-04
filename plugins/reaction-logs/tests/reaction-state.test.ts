@@ -26,6 +26,24 @@ const base = (overrides: Partial<ReactionPayload> = {}): ReactionPayload => ({
 const state = (): ReactionStorage => structuredClone(DefaultStorage)
 
 describe('Reaction Logs event state', () => {
+    test('an add event never creates a removal record', () => {
+        const current = applyReactionAdd(state(), base(), 100)
+        expect(current.activeReactions).toHaveLength(1)
+        expect(current.removalHistory).toHaveLength(0)
+        expect(buildNativeSnapshot(current, 100).activeRemovals).toHaveLength(0)
+    })
+
+    test('stored active and removal state survives a reload round trip', () => {
+        let current = applyReactionAdd(state(), base(), 100)
+        current = applyReactionRemove(current, base(), 200)
+        const reloaded = normalizeReactionStorage(JSON.parse(JSON.stringify(current)), 300)
+        expect(reloaded.removalHistory).toEqual(current.removalHistory)
+        expect(reloaded.activeReactions).toEqual([])
+        expect(buildNativeSnapshot(reloaded, 300).activeRemovals).toEqual(
+            buildNativeSnapshot(current, 300).activeRemovals,
+        )
+    })
+
     test('one add then one remove records the affected user', () => {
         let current = applyReactionAdd(state(), base(), 100)
         expect(current.activeReactions).toHaveLength(1)
