@@ -86,7 +86,7 @@ internal class ReactionLogHooks(
     @Volatile private var detailsEmojiKey: String? = null
     @Volatile private var detailsReactionType: Int = 0
     private var lastPopupWidget: WeakReference<Any>? = null
-    private var lastPopupModel: WeakReference<Any>? = null
+    private var lastPopupModel: Any? = null
     private var configurePopupMethod: Method? = null
     private var popupRetryKey: String? = null
     private var popupRetryAttempts = 0
@@ -220,7 +220,7 @@ internal class ReactionLogHooks(
 
     private fun refreshPopupModel() {
         val widget = lastPopupWidget?.get() ?: return
-        val model = lastPopupModel?.get() ?: return
+        val model = lastPopupModel ?: return
         val method = configurePopupMethod ?: return
         runCatching {
             method.invoke(widget, model)
@@ -460,7 +460,7 @@ internal class ReactionLogHooks(
             val model = param.args.getOrNull(0) ?: return@hook
             val widget = param.thisObject
             lastPopupWidget = WeakReference(widget)
-            lastPopupModel = WeakReference(model)
+            lastPopupModel = model
             val augmented = augmentReactionPopup(widget, model, dexFinder.classLoader)
             if (augmented !== model) param.args[0] = augmented
         })
